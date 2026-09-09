@@ -1,0 +1,907 @@
+# Import packages and setup
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+import re
+import time
+
+# Constants
+pc_to_m = 3.086e16
+Rjup = 71492e3
+
+# Model directories
+model_folder = (
+    ...
+)
+
+bobcat_folder = os.path.join(
+    model_folder,
+    "Bobcat"
+)
+
+diamondback_folder = os.path.join(
+    model_folder,
+    "DiamondBack"
+)
+
+# JWST Data Directories
+spectrum_folder = (
+    ...
+)
+
+output_folder = (
+    ...
+)
+
+# Target list and distances
+targets = pd.DataFrame({
+    "Target": [
+        "CW2106",
+        "GJ499C",
+        "HD16270B",
+        "HD37216B",
+        "HD46588B",
+        "HD89744B",
+        "HIP9269B",
+        "HIP38939B",
+        "HNPEGB",
+        "LSPMJ0632B",
+        "NLT1011B",
+        "SDSS1416"
+    ],
+
+    "Distance": [
+        34.112,
+        19.703,
+        21.236,
+        28.131,
+        18.202,
+        38.56,
+        24.727,
+        18.466,
+        18.133,
+        82.58,
+        55.128,
+        46.864
+    ],
+
+    "Distance Error": [
+        0.016,
+        0.022,
+        0.010,
+        0.016,
+        0.020,
+        0.065,
+        0.016,
+        0.006,
+        0.011,
+        0.13,
+        0.051,
+        0.037
+    ]
+
+})
+# save for final CSV
+summary = []
+
+# Plot Settings
+font_size = 15
+
+plt.rcParams.update({
+
+    "font.size": font_size,
+
+    "axes.labelsize": font_size,
+
+
+    "xtick.labelsize": font_size,
+
+    "ytick.labelsize": font_size,
+
+    "legend.fontsize": font_size
+
+})
+
+plt.rcParams.update({
+    "figure.facecolor": "white",
+    "axes.facecolor": "white",
+    "axes.edgecolor": "black",
+    "axes.labelcolor": "black",
+    "xtick.color": "black",
+    "ytick.color": "black",
+    "text.color": "black",
+    "legend.edgecolor": "black"
+})
+
+# Convolution Function
+
+def conv_non_uniform(obspec, modspec, res):
+
+    #Convolves atmospheric model spectrum onto JWST resolution.
+
+    #Parameters:
+
+    #obspec : array
+      #Observed spectrum:
+      #[wavelength, flux, uncertainty]
+
+    #modspec : array
+        #Model spectrum:
+        #[wavelength, flux]
+
+    #res : float
+        #Resolution element
+
+
+    #Returns:
+
+   # mod_flux : array
+        #Model flux sampled at JWST wavelengths
+
+    wlobs = obspec[0]
+    wlmod = modspec[0]
+    Fmod = modspec[1]
+
+    # wavelength spacing of observed spectrum
+
+    delta1 = np.abs(
+        wlobs - np.roll(wlobs, 1)
+    )
+
+    delta2 = np.abs(
+        wlobs - np.roll(wlobs, -1)
+    )
+
+    delta = 0.5 * (delta1 + delta2)
+
+    # Fix edges
+
+    delta[0] = delta[1]
+    delta[-1] = delta[-2]
+
+    mod_flux = np.zeros(len(wlobs))
+
+    for i in range(len(wlobs)):
+        sigma = delta[i] * res / 2.355
+
+        gaussian = np.exp(
+            -((wlmod - wlobs[i]) ** 2)
+            / (2 * sigma ** 2)
+        )
+
+        gaussian /= np.sum(gaussian)
+
+        mod_flux[i] = np.sum(
+            gaussian * Fmod
+        )
+
+    return mod_flux
+
+
+# Chi squared fitting function
+
+def chi2(obspec, modspec):
+    
+    #Calculates reduced chi-squared and best-fit scaling factor.
+
+    #Returns:
+    #chi2_value
+    #R2D2 scaling factor
+
+    # Convolve model to JWST resolution
+
+    conv_model = conv_non_uniform(
+        obspec,
+        modspec,
+        3.3
+    )
+
+    # Radius/distance scaling factor
+
+    R2D2 = (
+            np.sum(
+                obspec[1] *
+                conv_model /
+                obspec[2] ** 2
+            )
+            /
+            np.sum(
+                conv_model ** 2 /
+                obspec[2] ** 2
+            )
+    )
+
+    # Reduced chi squared
+
+    statistic = np.sum(
+        (
+                (obspec[1] - R2D2 * conv_model)
+                / obspec[2]) ** 2
+        )
+
+    chi_value = (
+            statistic / len(obspec[0])
+    )
+
+    if np.isnan(chi_value):
+        chi_value = 1e8
+
+    return chi_value, R2D2
+
+
+
+# Monte Carlo Radius Uncertainty
+
+def monte_carlo_radius(
+        obspec,
+        model_flux,
+        best_radius,
+        R2D2_best,
+        distance_pc,
+        distance_error_pc,
+        n_samples=1000
+):
+
+    radius_samples = []
+
+    for i in range(n_samples):
+
+        # Perturb observed spectrum
+        flux_mc = (
+            obspec[1]
+            +
+            np.random.normal(
+                0,
+                obspec[2]
+            )
+        )
+
+        # Perturb distance
+        distance_mc = np.random.normal(
+            distance_pc,
+            distance_error_pc
+        )
+
+        # Recalculate scaling
+        R2D2_mc = (
+            np.sum(
+                flux_mc *
+                model_flux /
+                obspec[2]**2
+            )
+            /
+            np.sum(
+                model_flux**2 /
+                obspec[2]**2
+            )
+        )
+
+        # Radius scales with distance and sqrt(R2D2)
+        radius_mc = (
+            best_radius *
+            np.sqrt(
+                R2D2_mc /
+                R2D2_best
+            )
+            *
+            distance_mc /
+            distance_pc
+        )
+
+        radius_samples.append(radius_mc)
+
+    return np.std(radius_samples)
+
+# Atmospheric model fitting function
+
+def fit_model_grid(
+        model_folder,
+        model_type,
+        obspec,
+        distance_pc,
+        distance_error_pc
+):
+
+    #Fits a grid of Sonora atmospheric models.
+    #Parameters:
+    #model_folder : str
+        #Folder containing model spectra
+
+    #model_type : str
+        #"Bobcat" or "Diamondback"
+
+    #obspec : array
+        #JWST spectrum:
+        #[wavelength, flux, uncertainty]
+
+    #distance_pc : float
+        #Distance to target in pc
+
+    #Returns:
+    #results : dataframe
+        #All model fits
+
+    #best_model : dataframe row
+        #Best fitting model
+
+    #best_flux : array
+        #Scaled best-fit spectrum
+
+    # Distance conversion
+
+    D = distance_pc * pc_to_m
+
+    # Load model list
+
+    if model_type == "Bobcat":
+
+        filelist = np.array(
+            [
+                f for f in os.listdir(model_folder)
+                if f.startswith("sp_t")
+                   and f.endswith("R3K.dat")
+            ]
+        )
+
+
+    elif model_type == "Diamondback":
+
+        filelist = np.array(
+            [
+                f for f in os.listdir(model_folder)
+                if f.startswith("t")
+                   and f.endswith("R3K.dat")
+            ]
+        )
+
+    print(
+        f"{model_type}: {len(filelist)} models found"
+    )
+
+    # Create dataframe
+    results = pd.DataFrame()
+
+    results["model"] = filelist
+
+    results["Teff"] = np.nan
+    results["log g"] = np.nan
+    results["MH"] = np.nan
+
+    if model_type == "Diamondback":
+        results["f_sed"] = np.nan
+
+    results["chi2"] = np.nan
+    results["radius"] = np.nan
+
+    # Decode filenames
+    for i, filename in enumerate(filelist):
+
+        try:
+
+            if model_type == "Bobcat":
+
+                values = re.findall(
+                    r'-?\d+\.?\d*',
+                    filename
+                )
+
+                teff = float(values[0])
+
+                gravity = float(values[1])
+
+                metallicity = float(values[2])
+
+                logg = np.log10(
+                    gravity * 100
+                )
+
+                results.loc[i, "Teff"] = teff
+
+                results.loc[i, "log g"] = logg
+
+                results.loc[i, "MH"] = metallicity
+
+
+            elif model_type == "Diamondback":
+
+                teff = float(
+                    re.search(
+                        r't(\d+)',
+                        filename
+                    ).group(1)
+                )
+
+                gravity = float(
+                    re.search(
+                        r'g(\d+)',
+                        filename
+                    ).group(1)
+                )
+
+                metallicity = float(
+                    re.search(
+                        r'_m([+-]?\d+\.\d+)',
+                        filename
+                    ).group(1)
+                )
+
+                fsed = float(
+                    re.search(
+                        r'f(\d+)',
+                        filename
+                    ).group(1)
+                )
+
+                logg = np.log10(
+                    gravity * 100
+                )
+
+                results.loc[i, "Teff"] = teff
+
+                results.loc[i, "log g"] = logg
+
+                results.loc[i, "MH"] = metallicity
+
+                results.loc[i, "f_sed"] = fsed
+
+
+    # Run chi squared fitting
+
+    for i, model in enumerate(filelist):
+
+        filepath = os.path.join(
+            model_folder,
+            model
+        )
+
+        try:
+
+            modspec = np.loadtxt(
+                filepath,
+                dtype=float,
+                comments="#",
+                unpack=True,
+            )
+
+            if modspec.shape[0] != 2:
+                print("Bad model format:", model)
+                continue
+
+            model_chi2, R2D2 = chi2(
+                obspec,
+                modspec
+            )
+
+
+            # radius calculation
+            radius = (np.sqrt(R2D2) * D / Rjup )
+
+            results.loc[i, "chi2"] = model_chi2
+
+            results.loc[i, "radius"] = radius
+
+
+        except Exception as e:
+
+            print(
+                "Skipping:",
+                model
+            )
+
+            print(e)
+
+
+    # Find best fit
+
+    results = results.dropna(
+        subset=["chi2"]
+    )
+
+    results_sorted = results.sort_values(
+        by="chi2"
+    ).reset_index(drop=True)
+
+    print(
+        results_sorted.head(5)
+    )
+
+    best_model = results_sorted.iloc[0]
+
+    # Load best fitting spectrum
+
+    best_spectrum = np.loadtxt(
+
+        os.path.join(
+            model_folder,
+            best_model["model"]
+        ),
+
+        dtype="d",
+        unpack=True,
+        skiprows=2
+    )
+
+    # Convolve and scale
+
+    convolved_best = conv_non_uniform(
+
+        obspec,
+        best_spectrum,
+        3.3
+
+    )
+
+    _, R2D2 = chi2(
+        obspec,
+        best_spectrum
+    )
+
+    best_flux = R2D2 * convolved_best
+
+    radius_error = monte_carlo_radius(
+        obspec,
+        convolved_best,
+        best_model["radius"],
+        R2D2,
+        distance_pc,
+        distance_error_pc
+    )
+
+    return (
+        results_sorted,
+        best_model,
+        best_flux,
+        radius_error
+    )
+
+
+def calculate_teff_uncertainty(results_sorted, percent=0.05):
+
+    best_chi2 = results_sorted["chi2"].min()
+
+    limit = best_chi2 * (1 + percent)
+
+    good_models = results_sorted[
+        results_sorted["chi2"] <= limit
+    ]
+
+    teff_error = np.std(good_models["Teff"])
+
+    return teff_error
+
+
+# Plot Best Fitting Model
+
+def plot_best_fit(
+        obspec,
+        best_model,
+        best_flux,
+        target_name,
+        model_type,
+        save_folder
+):
+  
+    #Plot the best-fitting atmospheric model.
+
+    #Parameters:
+    #obspec : observed spectrum
+
+    #best_model : pandas Series
+        #Best-fitting model parameters
+
+    #best_flux : ndarray
+        #Scaled model spectrum
+
+    #target_name : str
+
+    #model_type : str
+        #"Bobcat" or "Diamondback"
+
+    #save_folder : str
+        #Folder to save figure
+
+
+    plt.figure(figsize=(10, 6))
+    plt.gcf().set_facecolor("white")
+    plt.gca().set_facecolor("white")
+
+    # Plot observed spectrum
+
+    plt.plot(
+        obspec[0],
+        obspec[1],
+        color="black",
+        lw=1.5,
+        label="JWST Spectrum"
+    )
+
+
+    # Plot best-fit model
+
+    colour = "red" if model_type == "Bobcat" else "blue"
+
+    plt.plot(
+        obspec[0],
+        best_flux,
+        color=colour,
+        lw=2,
+        label=f"Best-fit Sonora {model_type} Model"
+    )
+
+
+    # Axes
+
+    plt.yscale("log")
+
+    plt.xlabel(
+        "Wavelength (μm)",
+        fontsize=15
+    )
+
+    plt.ylabel(
+        r"Flux (W m$^{-2}$ μm$^{-1}$)",
+        fontsize=15
+    )
+
+
+    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=15)
+
+
+    # Parameter box
+
+    if model_type == "Bobcat":
+
+        parameter_text = (
+
+            f"$T_{{eff}}$ = {best_model['Teff']:.0f} K\n"
+
+            f"log(g) = {best_model['log g']:.2f}\n"
+
+            f"[M/H] = {best_model['MH']:.1f}\n"
+
+            f"$\\chi^2_\\nu$ = {best_model['chi2']:.2f}\n"
+
+            f"Radius = {best_model['radius']:.2f} $R_{{Jup}}$"
+
+        )
+
+    else:
+
+        parameter_text = (
+
+            f"$T_{{eff}}$ = {best_model['Teff']:.0f} K\n"
+
+            f"log(g) = {best_model['log g']:.2f}\n"
+
+            f"[M/H] = {best_model['MH']:.1f}\n"
+
+            f"$f_{{sed}}$ = {best_model['f_sed']:.0f}\n"
+
+            f"$\\chi^2_\\nu$ = {best_model['chi2']:.2f}\n"
+
+            f"Radius = {best_model['radius']:.2f} $R_{{Jup}}$"
+
+        )
+
+    plt.text(
+        0.03,
+        0.03,
+        parameter_text,
+        transform=plt.gca().transAxes,
+        fontsize=15,
+        verticalalignment="bottom",
+        bbox=dict(
+            boxstyle="round",
+            facecolor="white",
+            alpha=0.8
+        )
+    )
+
+    # Legend
+
+    plt.legend(
+        fontsize=15,
+        loc="best"
+    )
+
+    plt.tight_layout()
+
+    # Save figure
+
+    filename = (
+        f"{target_name}_{model_type}_BestFit.png"
+    )
+
+    plt.savefig(
+
+        os.path.join(
+            save_folder,
+            filename
+        ),
+
+        dpi=300,
+
+        bbox_inches="tight",
+        facecolor="white"
+
+    )
+
+    plt.show()
+
+    plt.close()
+
+# Run all targets
+
+for _, row in targets.iterrows():
+
+    target_name = row["Target"]
+
+    distance_pc = float(row["Distance"])
+
+    distance_error_pc = float(row["Distance Error"])
+
+    print(f"Processing {target_name}")
+
+
+    # Create output folders
+
+    bobcat_save = os.path.join(
+        output_folder,
+        target_name,
+        "Bobcat_Plots",
+        "Best Fit X^2 Plot"
+    )
+
+    diamond_save = os.path.join(
+        output_folder,
+        target_name,
+        "Diamondback_Plots",
+        "Best Fit X^2 Plot"
+    )
+
+    os.makedirs(bobcat_save, exist_ok=True)
+    os.makedirs(diamond_save, exist_ok=True)
+
+
+    # Load JWST spectrum
+
+    spectrum_file = os.path.join(
+        spectrum_folder,
+        f"{target_name}_spectrum.txt"
+    )
+
+    data = np.loadtxt(spectrum_file)
+
+    obspec = np.array([
+        data[:, 0],
+        data[:, 1],
+        data[:, 2]
+    ])
+
+
+    # Bobcat
+
+    bobcat_results, bobcat_best, bobcat_flux, bobcat_radius_error = fit_model_grid(
+        bobcat_folder,
+        "Bobcat",
+        obspec,
+        distance_pc,
+        distance_error_pc
+    )
+
+    # Calculate Bobcat Teff uncertainty
+
+    bobcat_teff_error = calculate_teff_uncertainty(
+        bobcat_results
+    )
+
+    plot_best_fit(
+
+        obspec,
+        bobcat_best,
+        bobcat_flux,
+        target_name,
+        "Bobcat",
+        bobcat_save
+
+    )
+
+
+    # Diamondback
+
+    diamond_results, diamond_best, diamond_flux, diamond_radius_error = fit_model_grid(
+        diamondback_folder,
+        "Diamondback",
+        obspec,
+        distance_pc,
+        distance_error_pc
+    )
+
+    # Calculate Diamondback Teff uncertainty
+
+    diamondback_teff_error = calculate_teff_uncertainty(
+        diamond_results
+    )
+
+    plot_best_fit(
+
+        obspec,
+        diamond_best,
+        diamond_flux,
+        target_name,
+        "Diamondback",
+        diamond_save
+
+    )
+
+    # Save one row for CSV
+
+    summary.append({
+
+        "Target": target_name,
+
+        "Distance (pc)": distance_pc,
+
+        "Distance Error (pc)": distance_error_pc,
+
+        # Bobcat 
+
+        "Bobcat Model": bobcat_best["model"],
+
+        "Bobcat Teff": bobcat_best["Teff"],
+
+        "Bobcat Teff Error": bobcat_teff_error,
+
+        "Bobcat logg": bobcat_best["log g"],
+
+        "Bobcat [M/H]": bobcat_best["MH"],
+
+        "Bobcat Radius (RJup)": bobcat_best["radius"],
+
+        "Bobcat Radius Error (RJup)": bobcat_radius_error,
+
+        "Bobcat Chi2": bobcat_best["chi2"],
+
+        # Diamondback 
+
+        "Diamondback Model": diamond_best["model"],
+
+        "Diamondback Teff": diamond_best["Teff"],
+
+        "Diamondback Teff Error": diamondback_teff_error,
+
+        "Diamondback logg": diamond_best["log g"],
+
+        "Diamondback [M/H]": diamond_best["MH"],
+
+        "Diamondback fsed": diamond_best["f_sed"],
+
+        "Diamondback Radius (RJup)": diamond_best["radius"],
+
+        "Diamondback Radius Error (RJup)": diamond_radius_error,
+
+        "Diamondback Chi2": diamond_best["chi2"]
+
+    })
+
+    print(f"{target_name} complete\n")
+
+# Create csv
+
+summary = pd.DataFrame(summary)
+
+csv_file = os.path.join(
+    output_folder,
+    "Atmospheric_Model_BestFits.csv"
+)
+
+summary.to_csv(
+    csv_file,
+    index=False
+)
+
+print("All targets complete.")
+print(f"CSV saved to:\n{csv_file}")
+print(summary)
