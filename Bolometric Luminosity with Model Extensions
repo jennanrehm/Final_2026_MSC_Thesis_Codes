@@ -1,0 +1,2038 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import re
+import pandas as pd
+
+# settings
+# directories
+
+obs_folder = (
+    ...
+)
+
+model_folder = (
+    ...
+)
+
+output_folder = (
+    ...
+)
+
+output_csv = (
+    ...
+)
+
+# Targets and distances
+targets = {
+    "CW2106": {
+        "distance_pc": 34.112,
+        "distance_err_pc": 0.016
+    },
+
+    "GJ499C": {
+        "distance_pc": 19.703,
+        "distance_err_pc": 0.022
+    },
+
+    "HD16270B": {
+        "distance_pc": 21.236,
+        "distance_err_pc": 0.010
+    },
+
+    "HD37216B": {
+        "distance_pc": 28.131,
+        "distance_err_pc": 0.016
+    },
+
+    "HD46588B": {
+        "distance_pc": 18.202,
+        "distance_err_pc": 0.020
+    },
+
+    "HD89744B": {
+        "distance_pc": 38.560,
+        "distance_err_pc": 0.065
+    },
+
+    "HIP9269B": {
+        "distance_pc": 24.727,
+        "distance_err_pc": 0.016
+    },
+
+    "HIP38939B": {
+        "distance_pc": 18.466,
+        "distance_err_pc": 0.006
+    },
+
+    "HNPEGB": {
+        "distance_pc": 18.133,
+        "distance_err_pc": 0.011
+    },
+
+    "LSPMJ0632B": {
+        "distance_pc": 82.580,
+        "distance_err_pc": 0.130
+    },
+
+    "NLT1011B": {
+        "distance_pc": 55.128,
+        "distance_err_pc": 0.051
+    },
+
+    "SDSS1416": {
+        "distance_pc": 46.864,
+        "distance_err_pc": 0.037
+    }
+
+}
+
+# Fitting Regions
+
+blue_min = 1.0
+blue_max = 1.3
+
+red_min = 10.0
+red_max = 12.0
+
+# If a spectrum does not extend into the preferred red region,
+# use the final 2 microns of the observed spectrum instead.
+fallback_red_width = 2.0
+
+# long wavelength slope
+
+slope_min_um = 15.0
+slope_max_um = None
+
+# model grid
+
+temperature_min = 900
+temperature_max = 2400
+
+# temperature range around the best-fit model.
+# For example, if best T = 1100 K: 900, 1000, 1100, 1200, 1300 K
+
+temperature_uncertainty = 200
+temperature_step = 100
+
+
+# plot settings
+
+plot_max_wavelength = 25.0
+
+# constants
+
+pc_to_m = 3.085677581e16
+
+L_sun = 3.828e26
+
+R_Jup = 7.1492e7
+
+# Load Model
+
+def load_model(filename):
+
+    data = np.loadtxt(
+        filename,
+        encoding="latin1"
+    )
+
+    wavelength = data[:, 0]
+    flux = data[:, 1]
+
+    sort = np.argsort(wavelength)
+
+    wavelength = wavelength[sort]
+    flux = flux[sort]
+
+    mask = (
+        np.isfinite(wavelength)
+        &
+        np.isfinite(flux)
+    )
+
+    wavelength = wavelength[mask]
+    flux = flux[mask]
+
+    return wavelength, flux
+
+
+# Find Model Files
+
+def find_model_files():
+
+    model_files = []
+
+    for file in os.listdir(model_folder):
+
+        if (
+            file.endswith(".dat")
+            and file.startswith("t")
+            and not file.startswith("._")
+        ):
+
+            match = re.search(
+                r"t(\d+)",
+                file
+            )
+
+            if match:
+
+                temperature = int(
+                    match.group(1)
+                )
+
+                if (
+                    temperature >= temperature_min
+                    and temperature <= temperature_max
+                ):
+
+                    model_files.append(
+                        (
+                            temperature,
+                            os.path.join(
+                                model_folder,
+                                file
+                            )
+                        )
+                    )
+
+    return sorted(
+        model_files,
+        key=lambda x: x[0]
+    )
+
+
+# Fit Model to JWST ends
+
+def fit_model_region(
+        w_obs,
+        f_obs,
+        f_err,
+        w_mod,
+        f_mod,
+        region_min,
+        region_max
+):
+
+    # Interpolate observation onto model grid
+
+    f_obs_i = np.interp(
+        w_mod,
+        w_obs,
+        f_obs,
+        left=np.nan,
+        right=np.nan
+    )
+
+    f_err_i = np.interp(
+        w_mod,
+        w_obs,
+        f_err,
+        left=np.nan,
+        right=np.nan
+    )
+
+
+    # Valid fitting region
+
+    fit_mask = (
+        (w_mod >= region_min)
+        &
+        (w_mod <= region_max)
+        &
+        (w_mod >= w_obs.min())
+        &
+        (w_mod <= w_obs.max())
+        &
+        np.isfinite(f_obs_i)
+        &
+        np.isfinite(f_err_i)
+        &
+        (f_err_i > 0)
+        &
+        np.isfinite(f_mod)
+    )
+
+
+    if np.sum(fit_mask) == 0:
+
+        return (
+            np.inf,
+            np.nan,
+            np.full_like(
+                f_mod,
+                np.nan
+            )
+        )
+
+    # R^2 / D^2 scaling
+
+    numerator = np.sum(
+        (
+            f_obs_i[fit_mask]
+            *
+            f_mod[fit_mask]
+        )
+        /
+        f_err_i[fit_mask]**2
+    )
+
+
+    denominator = np.sum(
+        (
+            f_mod[fit_mask]**2
+        )
+        /
+        f_err_i[fit_mask]**2
+    )
+
+
+    if (
+        denominator == 0
+        or not np.isfinite(denominator)
+    ):
+
+        return (
+            np.inf,
+            np.nan,
+            np.full_like(
+                f_mod,
+                np.nan
+            )
+        )
+
+
+    scale = (
+        numerator /  denominator
+    )
+
+
+    # Scale model
+
+    f_scaled = ( scale  *  f_mod
+    )
+
+
+    # Chi squared
+
+    chi2 = np.sum(
+        (( f_obs_i[fit_mask]   - f_scaled[fit_mask] )
+            /
+            f_err_i[fit_mask])**2
+        )
+
+    if not np.isfinite(chi2):
+
+        return (
+            np.inf,
+            np.nan,
+            np.full_like(
+                f_mod,
+                np.nan
+            )
+        )
+
+
+    return (
+        chi2,
+        scale,
+        f_scaled
+    )
+
+
+# Calculate Radius
+
+def calculate_radius(
+        scale,
+        distance_m
+):
+
+    if (
+        not np.isfinite(scale)
+        or scale <= 0
+    ):
+
+        return np.nan
+
+    radius_m = (
+        distance_m * np.sqrt(scale)
+    )
+
+    radius_RJup = (
+        radius_m / R_Jup
+    )
+
+    return radius_RJup
+
+
+# Get Temperature Models
+
+def get_temperature_models(
+        results,
+        best_T,
+        uncertainty=200,
+        step=100
+):
+
+
+    #  temperatures around the best fit
+
+    requested_temperatures = np.arange(
+        best_T - uncertainty,
+        best_T + uncertainty + step,
+        step
+    )
+
+
+    # Only retain temperatures that actually exist in the atmospheric model grid.
+
+    available = {
+        int(x["T"]): x
+        for x in results
+    }
+
+
+    selected = []
+
+    for T in requested_temperatures:
+        T = int(T)
+        if T in available:
+
+            selected.append(
+                available[T]
+            )
+
+    return selected
+
+
+# Interpolate Model
+
+def interpolate_model(
+        wavelength,
+        flux,
+        target_wavelength
+):
+
+    if (
+        target_wavelength < wavelength.min()
+        or
+        target_wavelength > wavelength.max()
+    ):
+
+        return np.nan
+
+
+    return np.interp(
+        target_wavelength,
+        wavelength,
+        flux
+    )
+
+
+# Calculate long wavelength log slope
+
+def calculate_log_slope(
+        wavelength,
+        flux,
+        slope_min_um=15.0,
+        slope_max_um=None
+):
+
+    mask = (
+        np.isfinite(wavelength)
+        &
+        np.isfinite(flux)
+        &
+        (wavelength > 0)
+        &
+        (flux > 0)
+    )
+
+    wavelength_valid = wavelength[mask]
+    flux_valid = flux[mask]
+
+
+    if len(wavelength_valid) < 2:
+
+        return np.nan, np.nan, np.nan
+
+
+    model_max = np.max(
+        wavelength_valid
+    )
+
+
+    if slope_max_um is None:
+
+        slope_max = model_max
+
+    else:
+
+        slope_max = min(
+            slope_max_um,
+            model_max
+        )
+
+
+    slope_mask = (
+        (wavelength_valid >= slope_min_um)
+        &
+        (wavelength_valid <= slope_max)
+    )
+
+
+    wavelength_slope = (
+        wavelength_valid[slope_mask]
+    )
+
+    flux_slope = (
+        flux_valid[slope_mask]
+    )
+
+
+    if len(wavelength_slope) < 2:
+
+        return np.nan, np.nan, np.nan
+
+
+    log_wavelength = np.log10(
+        wavelength_slope
+    )
+
+    log_flux = np.log10(
+        flux_slope
+    )
+
+
+    slope, intercept = np.polyfit(
+        log_wavelength,
+        log_flux,
+        1
+    )
+
+
+    return (
+        slope,
+        wavelength_slope[0],
+        wavelength_slope[-1]
+    )
+
+
+# fitting regions
+
+def determine_fitting_regions(
+        w_obs
+):
+
+    obs_min = w_obs.min()
+    obs_max = w_obs.max()
+
+
+    # Blue Region
+
+    actual_blue_min = max(
+        blue_min,
+        obs_min
+    )
+
+    actual_blue_max = min(
+        blue_max,
+        obs_max
+    )
+
+
+    # Red Region
+
+    preferred_red_min = max(
+        red_min,
+        obs_min
+    )
+
+    preferred_red_max = min(
+        red_max,
+        obs_max
+    )
+
+    # If the preferred red region exists, use it. Otherwise use the final 2 microns of JWST (NLTT1011B has shorter spectrum).
+
+    if (
+        preferred_red_max > preferred_red_min
+    ):
+
+        actual_red_min = preferred_red_min
+        actual_red_max = preferred_red_max
+
+        red_region_type = (
+            "preferred 10-12 μm region"
+        )
+
+    else:
+
+        actual_red_max = obs_max
+
+        actual_red_min = max(
+            obs_min,
+            obs_max - fallback_red_width
+        )
+
+        red_region_type = (
+            "fallback final 2 μm of JWST"
+        )
+
+
+    return (
+        actual_blue_min,
+        actual_blue_max,
+        actual_red_min,
+        actual_red_max,
+        red_region_type
+    )
+
+
+# Hybrid bolometric SED
+
+def build_hybrid_sed(
+        blue_result,
+        red_result,
+        w_obs,
+        f_obs
+):
+
+    w_blue = blue_result["wave"]
+    f_blue = blue_result["flux"]
+
+    w_red = red_result["wave"]
+    f_red = red_result["flux"]
+
+
+    jwst_first = w_obs[0]
+    jwst_last = w_obs[-1]
+
+
+    blue_first = w_blue[0]
+    blue_last = w_blue[-1]
+
+    red_first = w_red[0]
+    red_last = w_red[-1]
+
+
+    # 0 to first model point
+
+    w_zero = np.array([
+        0.0,
+        blue_first
+    ])
+
+    f_zero = np.array([
+        0.0,
+        f_blue[0]
+    ])
+
+
+    # blue model
+
+    blue_mask = (
+        (w_blue >= blue_first)
+        &
+        (w_blue <= jwst_first)
+    )
+
+
+    w_blue_section = w_blue[
+        blue_mask
+    ]
+
+    f_blue_section = f_blue[
+        blue_mask
+    ]
+
+
+    if (
+        len(w_blue_section) == 0
+        or
+        w_blue_section[-1] < jwst_first
+    ):
+
+        f_blue_at_jwst = interpolate_model(
+            w_blue,
+            f_blue,
+            jwst_first
+        )
+
+        if np.isfinite(
+            f_blue_at_jwst
+        ):
+
+            w_blue_section = np.append(
+                w_blue_section,
+                jwst_first
+            )
+
+            f_blue_section = np.append(
+                f_blue_section,
+                f_blue_at_jwst
+            )
+
+
+    # JWST
+
+    w_jwst_section = w_obs.copy()
+
+    f_jwst_section = f_obs.copy()
+
+
+    # Red Model
+
+    red_mask = (
+        (w_red >= jwst_last) & (w_red <= red_last)
+    )
+
+
+    w_red_section = w_red[
+        red_mask
+    ]
+
+    f_red_section = f_red[
+        red_mask
+    ]
+
+
+    if (
+        len(w_red_section) == 0
+        or
+        w_red_section[0] > jwst_last
+    ):
+
+        f_red_at_jwst = interpolate_model(
+            w_red,
+            f_red,
+            jwst_last
+        )
+
+        if np.isfinite(
+            f_red_at_jwst
+        ):
+
+            w_red_section = np.insert(
+                w_red_section,
+                0,
+                jwst_last
+            )
+
+            f_red_section = np.insert(
+                f_red_section,
+                0,
+                f_red_at_jwst
+            )
+
+
+    return {
+
+        "w_zero": w_zero,
+        "f_zero": f_zero,
+
+        "w_blue": w_blue_section,
+        "f_blue": f_blue_section,
+
+        "w_jwst": w_jwst_section,
+        "f_jwst": f_jwst_section,
+
+        "w_red": w_red_section,
+        "f_red": f_red_section,
+
+        "blue_first": blue_first,
+        "blue_last": blue_last,
+
+        "red_first": red_first,
+        "red_last": red_last,
+
+        "jwst_first": jwst_first,
+        "jwst_last": jwst_last
+
+    }
+
+
+# Calculate Fbol
+
+def calculate_fbol(
+        blue_result,
+        red_result,
+        w_obs,
+        f_obs
+):
+
+    hybrid = build_hybrid_sed(
+        blue_result,
+        red_result,
+        w_obs,
+        f_obs
+    )
+
+    # 0 to first model point
+
+    F_blue_zero = np.trapezoid(
+        hybrid["f_zero"],
+        hybrid["w_zero"]
+    )
+
+    # blue model
+
+    if len(
+        hybrid["w_blue"]
+    ) >= 2:
+
+        F_blue_model = np.trapezoid(
+            hybrid["f_blue"],
+            hybrid["w_blue"]
+        )
+
+    else:
+
+        F_blue_model = 0.0
+
+
+    F_blue_total = (
+        F_blue_zero
+        +
+        F_blue_model
+    )
+
+
+    # JWST
+
+    F_JWST = np.trapezoid(
+        hybrid["f_jwst"],
+        hybrid["w_jwst"]
+    )
+
+
+    # Red model
+
+    if len(
+        hybrid["w_red"]
+    ) >= 2:
+
+        F_red_model = np.trapezoid(
+            hybrid["f_red"],
+            hybrid["w_red"]
+        )
+
+    else:
+
+        F_red_model = 0.0
+
+
+    # RAYLEIGH-JEANS TAIL
+
+    lambda_last = (
+        hybrid["red_last"]
+    )
+
+    F_last = (
+        red_result["flux"][-1]
+    )
+
+    # F_lambda ∝ lambda^-4
+    # Integral from lambda_last to infinity:
+    # F_RJ = F_last * lambda_last / 3
+
+    F_RJ = (
+        F_last
+        *
+        lambda_last
+        /
+        3.0
+    )
+
+
+    # Total
+
+    F_bol = (
+        F_blue_total + F_JWST + F_red_model + F_RJ
+    )
+
+
+    # percent of JWST is total flux
+
+    if F_bol > 0:
+
+        blue_percent = ( F_blue_total / F_bol * 100 )
+
+        jwst_percent = (
+            F_JWST / F_bol * 100
+        )
+
+        red_percent = (
+            F_red_model / F_bol * 100
+        )
+
+        RJ_percent = (
+            F_RJ / F_bol * 100
+        )
+
+    else:
+
+        blue_percent = np.nan
+        jwst_percent = np.nan
+        red_percent = np.nan
+        RJ_percent = np.nan
+
+
+    return {
+
+        "F_bol": F_bol,
+
+        "F_blue": F_blue_total,
+
+        "F_JWST": F_JWST,
+
+        "F_red": F_red_model,
+
+        "F_RJ": F_RJ,
+
+        "blue_percent": blue_percent,
+
+        "jwst_percent": jwst_percent,
+
+        "red_percent": red_percent,
+
+        "RJ_percent": RJ_percent,
+
+        "jwst_first": hybrid["jwst_first"],
+
+        "jwst_last": hybrid["jwst_last"],
+
+        "model_first": hybrid["blue_first"],
+
+        "model_last": hybrid["red_last"]
+
+    }
+
+
+# jwst uncertainty
+
+def calculate_observational_uncertainty(
+        w_obs,
+        f_err
+):
+    #Propagate the JWST flux uncertainties through trapezoidal integration used to calculate F_bol.
+
+    #Assumes the individual flux uncertainties are independent.
+
+    #For unevenly spaced wavelength points:
+
+        #sigma_F^2 = 1/4 [sigma_0^2 * dw_0^2+sum(sigma_i^2 * (dw_i + dw_{i+1})^2)
+            #+sigma_N^2 * dw_{N-1}^2]
+        #where dw_i = wavelength[i+1] - wavelength[i].
+
+    # Wavelength intervals
+
+    dw = np.diff(w_obs)
+
+    # Check that there are enough points
+
+    if len(w_obs) < 2:
+        return np.nan
+
+    # Variance of trapezoidal integral
+
+    variance = 0.25 * (
+
+        # First point
+        f_err[0]**2 * dw[0]**2
+        +
+        # Interior points
+        np.sum(
+            f_err[1:-1]**2 * ( dw[:-1] + dw[1:] )**2
+         )
+        +
+        # Final point
+        f_err[-1]**2 *  dw[-1]**2 )
+
+    # Return uncertainty
+
+    return np.sqrt(variance)
+
+# Find Models
+
+model_files = find_model_files()
+
+
+print("\nMODEL WAVELENGTH RANGES")
+
+for T, filename in model_files:
+
+    w_mod, f_mod = load_model(
+        filename
+    )
+
+    print(
+        f"{T:4d} K : "
+        f"{w_mod.min():.6f} - "
+        f"{w_mod.max():.6f} μm"
+    )
+
+
+print("SONORA DIAMONDBACK BOLOMETRIC LUMINOSITY")
+
+all_results = []
+
+# Main target loop
+
+for target_name, target_info in targets.items():
+
+    print(
+        f"TARGET: {target_name}"
+    )
+
+
+    # Distance
+
+    distance_pc = target_info[
+        "distance_pc"
+    ]
+
+    distance_err_pc = target_info[
+        "distance_err_pc"
+    ]
+
+
+    distance_m = (
+        distance_pc *  pc_to_m
+    )
+
+    distance_err_m = (
+        distance_err_pc  *  pc_to_m
+    )
+
+
+    # load JWST
+
+    obs_file = os.path.join(
+        obs_folder,
+        f"{target_name}_spectrum.txt"
+    )
+
+
+    if not os.path.exists(
+        obs_file
+    ):
+
+        print(
+            f"WARNING: Could not find "
+            f"{obs_file}"
+        )
+
+        continue
+
+
+    w_obs, f_obs, f_err = np.loadtxt(
+        obs_file,
+        unpack=True
+    )
+
+
+    # Sort
+
+    sort = np.argsort(
+        w_obs
+    )
+
+    w_obs = w_obs[sort]
+    f_obs = f_obs[sort]
+    f_err = f_err[sort]
+
+
+    # Remove invalid data
+
+    valid = (
+        np.isfinite(w_obs)
+        &
+        np.isfinite(f_obs)
+        &
+        np.isfinite(f_err)
+        &
+        (f_err > 0)
+    )
+
+
+    w_obs = w_obs[valid]
+    f_obs = f_obs[valid]
+    f_err = f_err[valid]
+
+
+    print(
+        f"\nJWST range: "
+        f"{w_obs.min():.4f} - "
+        f"{w_obs.max():.4f} μm"
+    )
+
+
+    # determine fitting regions
+
+    (
+        actual_blue_min,
+        actual_blue_max,
+        actual_red_min,
+        actual_red_max,
+        red_region_type
+    ) = determine_fitting_regions(
+        w_obs
+    )
+
+
+    print(
+        f"\nBlue fitting region: "
+        f"{actual_blue_min:.3f} - "
+        f"{actual_blue_max:.3f} μm"
+    )
+
+
+    print(
+        f"Red fitting region: "
+        f"{actual_red_min:.3f} - "
+        f"{actual_red_max:.3f} μm"
+    )
+
+
+    print(
+        f"Red region type: "
+        f"{red_region_type}"
+    )
+
+
+    # test all models
+
+    blue_results = []
+    red_results = []
+
+
+    for T, filename in model_files:
+
+        w_mod, f_mod = load_model(
+            filename
+        )
+
+        # Blue
+
+        (
+            blue_chi2,
+            blue_scale,
+            blue_flux
+        ) = fit_model_region(
+            w_obs,
+            f_obs,
+            f_err,
+            w_mod,
+            f_mod,
+            actual_blue_min,
+            actual_blue_max
+        )
+
+
+        blue_results.append({
+
+            "T": T,
+
+            "file": filename,
+
+            "wave": w_mod,
+
+            "flux": blue_flux,
+
+            "scale": blue_scale,
+
+            "chi2": blue_chi2
+
+        })
+
+
+        # Red
+
+        (
+            red_chi2,
+            red_scale,
+            red_flux
+        ) = fit_model_region(
+            w_obs,
+            f_obs,
+            f_err,
+            w_mod,
+            f_mod,
+            actual_red_min,
+            actual_red_max
+        )
+
+
+        red_results.append({
+
+            "T": T,
+
+            "file": filename,
+
+            "wave": w_mod,
+
+            "flux": red_flux,
+
+            "scale": red_scale,
+
+            "chi2": red_chi2
+
+        })
+
+
+    # valid fits
+
+    valid_blue_results = [
+        x
+        for x in blue_results
+        if np.isfinite(x["chi2"])
+        and np.isfinite(x["scale"])
+    ]
+
+    valid_red_results = [
+        x
+        for x in red_results
+        if np.isfinite(x["chi2"])
+        and np.isfinite(x["scale"])
+    ]
+
+
+    if len(
+        valid_blue_results
+    ) == 0:
+
+        print(
+            "ERROR: No valid blue model."
+        )
+        continue
+
+
+    if len(
+        valid_red_results
+    ) == 0:
+
+        print(
+            "ERROR: No valid red model."
+        )
+        continue
+
+
+    # best models
+
+    best_blue = min(
+        valid_blue_results,
+        key=lambda x: x["chi2"]
+    )
+
+
+    best_red = min(
+        valid_red_results,
+        key=lambda x: x["chi2"]
+    )
+
+    # R2/D2 and radius
+
+    blue_R2_D2 = (
+        best_blue["scale"]
+    )
+
+    red_R2_D2 = (
+        best_red["scale"]
+    )
+
+
+    blue_radius_RJup = calculate_radius(
+        blue_R2_D2,
+        distance_m
+    )
+
+
+    red_radius_RJup = calculate_radius(
+        red_R2_D2,
+        distance_m
+    )
+
+
+    #long wavelength model slope
+
+    (
+        red_log_slope,
+        slope_start_um,
+        slope_end_um
+    ) = calculate_log_slope(
+        best_red["wave"],
+        best_red["flux"],
+        slope_min_um=slope_min_um,
+        slope_max_um=slope_max_um
+    )
+
+
+    print(
+        f"\nLong-wavelength model slope = "
+        f"{red_log_slope:.4f}"
+    )
+
+    print(
+        f"Slope measured from "
+        f"{slope_start_um:.4f} "
+        f"to "
+        f"{slope_end_um:.4f} μm"
+    )
+
+    print(
+        "Rayleigh-Jeans slope = -4.0000"
+    )
+
+
+    print(
+        "\nBest blue model:"
+    )
+
+    print(
+        os.path.basename(
+            best_blue["file"]
+        )
+    )
+
+    print(
+        f"Blue Teff = "
+        f"{best_blue['T']} K"
+    )
+
+    print(
+        f"Blue chi2 = "
+        f"{best_blue['chi2']:.4f}"
+    )
+
+    print(
+        f"Blue R²/D² = "
+        f"{blue_R2_D2:.6e}"
+    )
+
+    print(
+        f"Blue radius = "
+        f"{blue_radius_RJup:.4f} R_Jup"
+    )
+
+
+    print(
+        "\nBest red model:"
+    )
+
+    print(
+        os.path.basename(
+            best_red["file"]
+        )
+    )
+
+    print(
+        f"Red Teff = "
+        f"{best_red['T']} K"
+    )
+
+    print(
+        f"Red chi2 = "
+        f"{best_red['chi2']:.4f}"
+    )
+
+    print(
+        f"Red R²/D² = "
+        f"{red_R2_D2:.6e}"
+    )
+
+    print(
+        f"Red radius = "
+        f"{red_radius_RJup:.4f} R_Jup"
+    )
+
+
+    # best Fbol
+
+    bolo = calculate_fbol(
+        best_blue,
+        best_red,
+        w_obs,
+        f_obs
+    )
+
+
+    F_bol = bolo[
+        "F_bol"
+    ]
+
+
+    # MODEL UNCERTAINTY
+    # This now uses exact temperature offsets from the best-fitting temperature.
+    # It does NOT select the next-best chi2 models.
+  
+    near_blue = get_temperature_models(
+        valid_blue_results,
+        best_blue["T"],
+        uncertainty=temperature_uncertainty,
+        step=temperature_step
+    )
+
+    near_red = get_temperature_models(
+        valid_red_results,
+        best_red["T"],
+        uncertainty=temperature_uncertainty,
+        step=temperature_step
+    )
+
+    print(
+        "\nModels used for model uncertainty:"
+    )
+
+    print(
+        "Blue temperatures:",
+        [m["T"] for m in near_blue]
+    )
+
+    print(
+        "Red temperatures:",
+        [m["T"] for m in near_red]
+    )
+
+    # Calculate Fbol for Temperature grid
+
+    Fbol_models = []
+
+
+    for bm in near_blue:
+
+        for rm in near_red:
+
+            try:
+
+                test_bolo = calculate_fbol(
+                    bm,
+                    rm,
+                    w_obs,
+                    f_obs
+                )
+
+
+                test_Fbol = test_bolo[
+                    "F_bol"
+                ]
+
+
+                if np.isfinite(
+                    test_Fbol
+                ):
+
+                    Fbol_models.append(
+                        test_Fbol
+                    )
+
+            except Exception as e:
+
+                print(
+                    "WARNING: Model uncertainty "
+                    "calculation failed:"
+                )
+
+                print(e)
+
+
+    Fbol_models = np.array(
+        Fbol_models
+    )
+
+
+    if len(
+        Fbol_models
+    ) > 1:
+
+        Fbol_model_err = np.std(
+            Fbol_models,
+            ddof=1
+        )
+
+    else:
+
+        Fbol_model_err = 0.0
+
+
+    # JWST uncertainty
+
+    F_bol_err_obs = (
+        calculate_observational_uncertainty(
+            w_obs,
+            f_err
+        )
+    )
+
+
+    # total Fbol uncertainty
+
+    F_bol_err = np.sqrt( F_bol_err_obs**2 + Fbol_model_err**2 )
+
+    # convery to luminosity
+
+    L = (4 * np.pi * distance_m**2 * F_bol)
+
+    L_err_flux = (4 * np.pi * distance_m**2 * F_bol_err )
+
+    L_err_distance = ( 8 * np.pi * distance_m * F_bol * distance_err_m )
+
+    L_err = np.sqrt(L_err_flux**2 + L_err_distance**2)
+
+    # units
+
+    L_ratio = ( L/ L_sun )
+
+    logL = np.log10(L_ratio)
+
+    logL_err = (L_err / L ) / np.log(10)
+
+    # print results
+
+    print(
+        "BOLOMETRIC FLUX"
+    )
+
+    print(
+        f"0 to first model: "
+        f"{bolo['F_blue']:.6e} W m^-2 "
+        f"({bolo['blue_percent']:.3f}%)"
+    )
+
+    print(
+        f"JWST: "
+        f"{bolo['F_JWST']:.6e} W m^-2 "
+        f"({bolo['jwst_percent']:.3f}%)"
+    )
+
+    print(
+        f"Red model: "
+        f"{bolo['F_red']:.6e} W m^-2 "
+        f"({bolo['red_percent']:.3f}%)"
+    )
+
+    print(
+        f"RJ tail: "
+        f"{bolo['F_RJ']:.6e} W m^-2 "
+        f"({bolo['RJ_percent']:.3f}%)"
+    )
+
+    print(
+        f"\nTotal Fbol: "
+        f"{F_bol:.6e} W m^-2"
+    )
+
+    print(
+        f"Observed uncertainty: "
+        f"{F_bol_err_obs:.6e}"
+    )
+
+    print(
+        f"Model uncertainty: "
+        f"{Fbol_model_err:.6e}"
+    )
+
+    print(
+        f"Total Fbol uncertainty: "
+        f"{F_bol_err:.6e}"
+    )
+
+    print(
+        "LUMINOSITY"
+    )
+
+
+    print(
+        f"L = "
+        f"{L:.6e} W"
+    )
+
+
+    print(
+        f"L/Lsun = "
+        f"{L_ratio:.6e}"
+    )
+
+
+    print(
+        f"log(L/Lsun) = "
+        f"{logL:.5f} "
+        f"+/- "
+        f"{logL_err:.5f}"
+    )
+
+
+    # output directory
+
+    target_folder = os.path.join(
+        output_folder,
+        target_name,
+        "Bolometric Luminosity"
+    )
+
+
+    os.makedirs(
+        target_folder,
+        exist_ok=True
+    )
+
+
+    # plot
+
+    plt.figure(
+        figsize=(12, 6)
+    )
+
+    # 0 to first model point
+
+    lambda_first = (
+        best_blue["wave"][0]
+    )
+
+    flux_first = (
+        best_blue["flux"][0]
+    )
+
+    positive_fluxes = np.concatenate([
+        best_blue["flux"][
+            best_blue["flux"] > 0
+        ],
+        f_obs[
+            f_obs > 0
+        ],
+        best_red["flux"][
+            best_red["flux"] > 0
+        ]
+    ])
+
+
+    if len(
+        positive_fluxes
+    ) > 0:
+
+        plot_floor = (
+            np.min(positive_fluxes)
+            *
+            0.05
+        )
+
+    else:
+
+        plot_floor = 1e-30
+
+
+    plt.plot(
+        [0.0, lambda_first],
+        [plot_floor, flux_first],
+        color="gray",
+        linestyle=":",
+        linewidth=1.6,
+        alpha=0.6,
+        label="Wien's tail"
+    )
+
+
+    # blue model
+
+    blue_plot_mask = (
+        (best_blue["wave"] >= lambda_first)
+        &
+        (best_blue["wave"] <= w_obs.min())
+    )
+
+
+    if np.sum(
+        blue_plot_mask
+    ) > 0:
+
+        plt.plot(
+            best_blue["wave"][
+                blue_plot_mask
+            ],
+            best_blue["flux"][
+                blue_plot_mask
+            ],
+            color="blue",
+            linewidth=2,
+            label=(
+                f"Diamondback model "
+                f"({best_blue['T']} K)"
+            )
+        )
+
+
+    # JWST
+
+    plt.plot(
+        w_obs,
+        f_obs,
+        color="black",
+        linewidth=1.3,
+        label="JWST"
+    )
+
+
+    # red model
+
+    red_plot_mask = (
+        best_red["wave"]
+        >=
+        w_obs.max()
+    )
+
+
+    if np.sum(
+        red_plot_mask
+    ) > 0:
+
+        plt.plot(
+            best_red["wave"][
+                red_plot_mask
+            ],
+            best_red["flux"][
+                red_plot_mask
+            ],
+            color="red",
+            linewidth=2,
+            label=(
+                f"Diamondback model "
+                f"({best_red['T']} K)"
+            )
+        )
+
+
+    # RAYLEIGH-JEANS TAIL
+
+    lambda_last = (
+        best_red["wave"][-1]
+    )
+
+    F_last = (
+        best_red["flux"][-1]
+    )
+
+
+    if lambda_last < plot_max_wavelength:
+
+        w_RJ_plot = np.linspace(
+            lambda_last,
+            plot_max_wavelength,
+            300
+        )
+
+
+        f_RJ_plot = (
+            F_last
+            *
+            (
+                lambda_last
+                /
+                w_RJ_plot
+            )**4
+        )
+
+
+        plt.plot(
+            w_RJ_plot,
+            f_RJ_plot,
+            color="green",
+            linestyle=":",
+            linewidth=1.8,
+            alpha=0.7,
+            label="Rayleigh–Jeans tail"
+        )
+
+
+    # axes
+
+    plt.xlabel(
+        "Wavelength (μm)",
+        fontsize=15
+    )
+
+
+    plt.ylabel(
+        r"Flux ($W\,m^{-2}\,\mu m^{-1}$)",
+        fontsize=15
+    )
+
+
+    plt.xlim(
+        0,
+        plot_max_wavelength
+    )
+
+
+    plt.xticks(
+        np.arange(
+            0,
+            plot_max_wavelength + 2.5,
+            2.5
+        )
+    )
+
+
+    plt.yscale(
+        "log"
+    )
+
+
+    plt.legend(
+        fontsize=15,
+        loc="best"
+    )
+
+
+    # Save Figure
+
+    plot_filename = os.path.join(
+        target_folder,
+        f"Hybrid_Bolo_Lum_RJ_{target_name}.png"
+    )
+
+
+    plt.savefig(
+        plot_filename,
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+
+    plt.close()
+
+
+    print(
+        f"\nPlot saved to:"
+    )
+
+    print(
+        plot_filename
+    )
+
+
+    # Save results
+
+    all_results.append({
+
+        "Target":
+            target_name,
+
+        "Distance_pc":
+            distance_pc,
+
+        "Distance_error_pc":
+            distance_err_pc,
+
+        # Blue model
+
+        "Blue_Model":
+            best_blue["file"],
+
+        "Blue_Teff_K":
+            best_blue["T"],
+
+        "Blue_chi2":
+            best_blue["chi2"],
+
+        "Blue_R2_D2":
+            blue_R2_D2,
+
+        "Blue_Radius_RJup":
+            blue_radius_RJup,
+
+        # Red model
+
+        "Red_Model":
+            best_red["file"],
+
+        "Red_Teff_K":
+            best_red["T"],
+
+        "Red_chi2":
+            best_red["chi2"],
+
+        "Red_R2_D2":
+            red_R2_D2,
+
+        "Red_Radius_RJup":
+            red_radius_RJup,
+
+        # Fitting regions
+
+        "Blue_fit_min_um":
+            actual_blue_min,
+
+        "Blue_fit_max_um":
+            actual_blue_max,
+
+        "Red_fit_min_um":
+            actual_red_min,
+
+        "Red_fit_max_um":
+            actual_red_max,
+
+        # long wavelength slope
+
+        "Long_wavelength_log_slope":
+            red_log_slope,
+
+        "Slope_start_um":
+            slope_start_um,
+
+        "Slope_end_um":
+            slope_end_um,
+
+        # wavelength range
+
+        "JWST_min_um":
+            bolo["jwst_first"],
+
+        "JWST_max_um":
+            bolo["jwst_last"],
+
+        "Model_min_um":
+            bolo["model_first"],
+
+        "Model_max_um":
+            bolo["model_last"],
+
+        # flux
+
+        "F_blue":
+            bolo["F_blue"],
+
+        "F_JWST":
+            bolo["F_JWST"],
+
+        "F_red":
+            bolo["F_red"],
+
+        "F_RJ":
+            bolo["F_RJ"],
+
+        "F_bol":
+            F_bol,
+
+        "F_bol_error":
+            F_bol_err,
+
+        # uncertainties
+
+        "Observed_spectrum_uncertainty":
+            F_bol_err_obs,
+
+        "Model_temperature_uncertainty":
+            Fbol_model_err,
+
+        # contributions
+
+        "Blue_percent":
+            bolo["blue_percent"],
+
+        "JWST_percent":
+            bolo["jwst_percent"],
+
+        "Red_model_percent":
+            bolo["red_percent"],
+
+        "RJ_tail_percent":
+            bolo["RJ_percent"],
+
+        # luminosity
+
+        "Luminosity_W":
+            L,
+
+        "Luminosity_error_W":
+            L_err,
+
+        "L_Lsun":
+            L_ratio,
+
+        "log_L_Lsun":
+            logL,
+
+        "log_L_error":
+            logL_err
+
+    })
+
+
+# save all targets
+
+results_df = pd.DataFrame(
+    all_results
+)
+
+
+results_df.to_csv(
+    output_csv,
+    index=False
+)
+
+
+# final sumary
+
+
+print(
+    "FINAL BOLOMETRIC LUMINOSITY SUMMARY"
+)
+
+
+summary_columns = [
+
+    "Target",
+
+    "Blue_Teff_K",
+
+    "Red_Teff_K",
+
+    "Blue_R2_D2",
+
+    "Red_R2_D2",
+
+    "Blue_Radius_RJup",
+
+    "Red_Radius_RJup",
+
+    "Long_wavelength_log_slope",
+
+    "Slope_start_um",
+
+    "Slope_end_um",
+
+    "F_bol",
+
+    "F_bol_error",
+
+    "log_L_Lsun",
+
+    "log_L_error",
+
+    "RJ_tail_percent"
+
+]
+
+
+print(
+    results_df[
+        summary_columns
+    ].to_string(
+        index=False
+    )
+)
+
+
+print(
+    "\nSaved results to:"
+)
+
+print(
+    output_csv
+)
+
+
+print(
+    "\nAll targets completed."
+)
