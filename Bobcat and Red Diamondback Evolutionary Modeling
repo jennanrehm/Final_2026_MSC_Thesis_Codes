@@ -1,0 +1,2172 @@
+# Bobcat and Red Dimaondback Evolutionary Modeling
+# Method:
+#   For each evolutionary mass track:
+#   1. Restrict the evolutionary track to the observed age range.
+#   2. Interpolate the evolutionary track in age.
+#   3. Determine whether the track reaches the observed
+#      luminosity interval WHILE it is inside the allowed age interval.
+#   4. A mass track is considered evolutionary-consistent
+#      ONLY if:
+#          age_min <= age <= age_max
+#      and
+#          logL_min <= logL(age) <= logL_max
+#      at the SAME AGE.
+#   5. The corresponding evolutionary radius is evaluated over
+#      the simultaneous age + luminosity intersection.
+#   6. Only evolutionary tracks that genuinely intersect
+#      BOTH constraints are retained.
+#   7. The overall allowed evolutionary mass and radius ranges
+#      are determined from all allowed tracks.
+#   8. The midpoint of the evolutionary radius range is used
+#      to derive Teff from the measured bolometric luminosity:
+#          L = 4 pi R^2 sigma T_eff^4
+#   9. The midpoint of the evolutionary mass range and the
+#      midpoint evolutionary radius are used to derive:
+#          g = G M / R^2
+#          logg = log10(g)
+#  10. Half of the evolutionary mass/radius range is treated
+#      as the uncertainty:
+#          sigma_R = (Rmax - Rmin) / 2
+#          sigma_M = (Mmax - Mmin) / 2
+#  11. Luminosity uncertainty is propagated as an absolute
+#      luminosity uncertainty derived from the measured
+#      uncertainty in log(L/Lsun):
+#          sigma_L = ln(10) * L * sigma_logL
+#      This is then combined in quadrature with the radius
+#      uncertainty when calculating Teff.
+#  12. Mass and radius uncertainties are combined in quadrature
+#      when calculating logg.
+#   13. Produce four plots per target/model:
+#          - Age vs log(L/Lsun) [FULL]
+#          - Age vs log(L/Lsun) [ZOOM]
+#          - Age vs Radius      [FULL]
+#          - Age vs Radius      [ZOOM]
+
+# Import Packages
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Constants
+G = 6.67430e-11
+SIGMA_SB = 5.670374419e-8
+L_SUN = 3.828e26
+R_JUP = 7.1492e7
+M_JUP = 1.89813e27
+
+# Directories
+
+RESULTS_DIR = (
+    ...
+)
+
+BOBCAT_EVO_DIR = (
+    ...
+)
+
+DIAMONDBACK_EVO_DIR = (
+    ...
+)
+
+
+# Input Files
+
+BOBCAT_ATMOS_FILE = os.path.join(
+    RESULTS_DIR,
+    "FINAL_BOBCAT_ATMOS_BEST_FITS.csv"
+)
+
+DIAMONDBACK_ATMOS_FILE = os.path.join(
+    RESULTS_DIR,
+    "FINAL_DIAMONDBACK_ATMOS_BEST_FITS.csv"
+)
+
+LUMINOSITY_FILE = os.path.join(
+    RESULTS_DIR,
+    "FINAL_BOL_LUM.csv"
+)
+
+
+# Output Direcorites
+
+os.makedirs(
+    RESULTS_DIR,
+    exist_ok=True
+)
+
+
+# Evolutionary Model Files
+
+BOBCAT_EVO_FILES = {
+
+    -0.5: os.path.join(
+        BOBCAT_EVO_DIR,
+        "nc-0.5co1.0.age"
+    ),
+
+    0.0: os.path.join(
+        BOBCAT_EVO_DIR,
+        "nc+0.0co1.0.age"
+    ),
+
+    0.5: os.path.join(
+        BOBCAT_EVO_DIR,
+        "nc+0.5co1.0.age"
+    )
+}
+
+
+DIAMONDBACK_EVO_FILES = {
+
+    -0.5: os.path.join(
+        DIAMONDBACK_EVO_DIR,
+        "RedDiamondback_Zm050_age"
+    ),
+
+    0.0: os.path.join(
+        DIAMONDBACK_EVO_DIR,
+        "RedDiamondback_Zp000_age"
+    ),
+
+    0.5: os.path.join(
+        DIAMONDBACK_EVO_DIR,
+        "RedDiamondback_Zp050_age"
+    )
+}
+
+
+# Target Age Ranges
+
+AGE_RANGES = {
+    "CW2106":      (1.0, 5.0),
+    "GJ499C":      (0.5, 1.0),
+    "HD16270B":    (0.6, 1.0),
+    "HD37216B":    (1.12, 9.25),
+    "HD46588B":    (1.3, 4.3),
+    "HD89744B":    (1.5, 3.0),
+    "HIP9269B":    (2.20, 10.20),
+    "HIP38939B":   (0.3, 2.8),
+    "HNPEGB":      (0.1, 0.5),
+    "LSPMJ0632B":  (0.2, 10.0),
+    "NLT1011B":    (0.3, 10.0),
+    "SDSS1416":    (0.6, 8.95)
+}
+
+
+# PLot Settings
+
+AGE_PADDING_FRACTION = 0.18
+MIN_AGE_PADDING = 0.12
+
+
+# Atmospheric results
+
+bobcat_atmos = pd.read_csv(
+    BOBCAT_ATMOS_FILE
+)
+
+diamondback_atmos = pd.read_csv(
+    DIAMONDBACK_ATMOS_FILE
+)
+
+# Luminosity Results
+
+luminosity = pd.read_csv(
+    LUMINOSITY_FILE
+)
+
+# Clean CSV Column Names
+
+bobcat_atmos.columns = bobcat_atmos.columns.str.strip()
+diamondback_atmos.columns = diamondback_atmos.columns.str.strip()
+luminosity.columns = luminosity.columns.str.strip()
+
+# convert columns to numberic
+
+def convert_numeric(df, columns):
+
+    for column in columns:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    return df
+
+
+bobcat_atmos = convert_numeric(
+    bobcat_atmos,
+    [
+        "Bobcat Teff",
+        "Bobcat Teff Error",
+        "Bobcat logg",
+        "Bobcat logg error +",
+        "Bobcat logg error -",
+        "Bobcat [M/H]",
+        "Bobcat Radius (RJup)",
+        "Bobcat Radius Error (RJup)"
+    ]
+)
+
+diamondback_atmos = convert_numeric(
+    diamondback_atmos,
+    [
+        "Diamondback Teff",
+        "Diamondback Teff Error",
+        "Diamondback logg",
+        "Diamondback logg error +",
+        "Diamondback logg error -",
+        "Diamondback [M/H]",
+        "Diamondback fsed",
+        "Diamondback Radius (RJup)",
+        "Diamondback Radius Error (RJup)"
+    ]
+)
+
+
+luminosity = convert_numeric(
+    luminosity,
+    [
+        "L_Lsun",
+        "log_L_Lsun",
+        "log_L_error"
+    ]
+)
+# Match Metallicity to avaliable grid
+
+def nearest_metallicity(
+    value
+):
+
+    available = np.array([
+        -0.5,
+        0.0,
+        0.5
+    ])
+
+    return available[
+        np.argmin(
+            np.abs(
+                available - value
+            )
+        )
+    ]
+
+
+# Load Bobcat Evolutionary Grid
+
+def load_bobcat_grid(
+    metallicity
+):
+
+    mh = nearest_metallicity(
+        metallicity
+    )
+
+    filename = BOBCAT_EVO_FILES[
+        mh
+    ]
+
+    print(
+        f"      Loading Bobcat grid "
+        f"[M/H] = {mh:+.1f}: "
+        f"{os.path.basename(filename)}"
+    )
+
+    grid = pd.read_csv(
+        filename,
+        sep=r"\s+"
+    )
+
+    for column in [
+        "age",
+        "M",
+        "logL",
+        "R"
+    ]:
+
+        grid[column] = pd.to_numeric(
+            grid[column],
+            errors="coerce"
+        )
+
+    grid = grid.dropna(
+        subset=[
+            "age",
+            "M",
+            "logL",
+            "R"
+        ]
+    ).copy()
+
+    return grid, mh
+
+
+# Load Red Diamondback Evolutionary Grid
+
+def load_diamondback_grid(
+    metallicity
+):
+
+    if metallicity <= -0.25:
+
+        evo_file = (
+            DIAMONDBACK_EVO_FILES[-0.5]
+        )
+
+        used_mh = -0.5
+
+    elif metallicity >= 0.25:
+
+        evo_file = (
+            DIAMONDBACK_EVO_FILES[0.5]
+        )
+
+        used_mh = 0.5
+
+    else:
+
+        evo_file = (
+            DIAMONDBACK_EVO_FILES[0.0]
+        )
+
+        used_mh = 0.0
+
+    print(
+        evo_file
+    )
+
+    rows = []
+
+    with open(
+        evo_file,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        for line in f:
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+            if line.startswith(
+                "age(Gyr)"
+            ):
+                continue
+
+            parts = line.split()
+
+            if len(parts) != 6:
+                continue
+
+            try:
+
+                values = [
+                    float(x)
+                    for x in parts
+                ]
+
+            except ValueError:
+
+                continue
+
+            rows.append(
+                values
+            )
+
+    grid = pd.DataFrame(
+        rows,
+        columns=[
+            "age",
+            "M",
+            "logL",
+            "Teff",
+            "logg",
+            "R"
+        ]
+    )
+
+    grid = grid.dropna().copy()
+
+    grid = grid.sort_values(
+        [
+            "M",
+            "age"
+        ]
+    ).reset_index(
+        drop=True
+    )
+
+    print(
+        f"Loaded {len(grid)} "
+        f"Diamondback evolutionary model points."
+    )
+
+    print(
+        f"Age range: "
+        f"{grid['age'].min():.4f} - "
+        f"{grid['age'].max():.4f} Gyr"
+    )
+
+    print(
+        f"Mass range: "
+        f"{grid['M'].min():.5f} - "
+        f"{grid['M'].max():.5f} Msun"
+    )
+
+    print(
+        f"log(L/Lsun) range: "
+        f"{grid['logL'].min():.4f} - "
+        f"{grid['logL'].max():.4f}"
+    )
+
+    return grid, used_mh
+
+
+# Find Simultaneous age and luminosity intersection
+
+def find_track_intersection(
+    track,
+    age_min,
+    age_max,
+    logL_min,
+    logL_max,
+    interpolation_points=5000
+):
+
+    track = (
+        track
+        .sort_values("age")
+        .drop_duplicates(
+            subset="age"
+        )
+        .copy()
+    )
+
+    if len(track) < 2:
+
+        return None
+
+    ages = track["age"].values
+    logLs = track["logL"].values
+    radii = track["R"].values
+
+    # Check age overlap
+
+    if (
+        age_max < ages.min()
+        or
+        age_min > ages.max()
+    ):
+
+        return None
+
+    # Restrict interpolation to allowed age region
+
+    restricted_min = max(
+        age_min,
+        ages.min()
+    )
+
+    restricted_max = min(
+        age_max,
+        ages.max()
+    )
+
+    if restricted_min >= restricted_max:
+
+        return None
+
+    # Dense age grid
+
+    dense_age = np.linspace(
+        restricted_min,
+        restricted_max,
+        interpolation_points
+    )
+
+    dense_logL = np.interp(
+        dense_age,
+        ages,
+        logLs
+    )
+
+    dense_radius = np.interp(
+        dense_age,
+        ages,
+        radii
+    )
+
+    # Identify simultaneous luminosity constraint
+
+    inside_luminosity = (
+        (dense_logL >= logL_min)
+        &
+        (dense_logL <= logL_max)
+    )
+
+    if not np.any(
+        inside_luminosity
+    ):
+
+        return None
+
+    valid_age = dense_age[
+        inside_luminosity
+    ]
+
+    valid_logL = dense_logL[
+        inside_luminosity
+    ]
+
+    valid_radius = dense_radius[
+        inside_luminosity
+    ]
+
+    # Simultaneous intersection
+
+    return {
+
+        "age_min":
+            valid_age.min(),
+
+        "age_max":
+            valid_age.max(),
+
+        "logL_min":
+            valid_logL.min(),
+
+        "logL_max":
+            valid_logL.max(),
+
+        "radius_min":
+            valid_radius.min(),
+
+        "radius_max":
+            valid_radius.max()
+    }
+
+
+# Find all allowed mass tracks
+
+def find_allowed_tracks(
+    evo,
+    age_min,
+    age_max,
+    logL_min,
+    logL_max
+):
+
+    allowed_tracks = []
+
+    for mass in np.sort(
+        evo["M"].unique()
+    ):
+
+        track = evo[
+            evo["M"] == mass
+        ].copy()
+
+        intersection = (
+            find_track_intersection(
+                track=track,
+                age_min=age_min,
+                age_max=age_max,
+                logL_min=logL_min,
+                logL_max=logL_max
+            )
+        )
+
+        if intersection is not None:
+
+            allowed_tracks.append({
+
+                "M": mass,
+
+                "age_min":
+                    intersection[
+                        "age_min"
+                    ],
+
+                "age_max":
+                    intersection[
+                        "age_max"
+                    ],
+
+                "logL_min":
+                    intersection[
+                        "logL_min"
+                    ],
+
+                "logL_max":
+                    intersection[
+                        "logL_max"
+                    ],
+
+                "radius_min":
+                    intersection[
+                        "radius_min"
+                    ],
+
+                "radius_max":
+                    intersection[
+                        "radius_max"
+                    ]
+            })
+
+    return allowed_tracks
+
+
+# derive Teff and log(g)
+
+# Radius midpoint:
+#     R_mid = (R_min + R_max) / 2
+# Radius uncertainty:
+#     sigma_R = (R_max - R_min) / 2
+# Teff:
+#     T = [L / (4 pi sigma R^2)]^(1/4)
+# Luminosity uncertainty:
+#     sigma_L = ln(10) * L * sigma_logL
+# Teff uncertainty:
+#     sigma_T^2 = (dT/dL)^2 sigma_L^2 + (dT/dR)^2 sigma_R^2
+# logg:
+#     g = GM/R^2
+#     logg = log10(g)
+# Uncertainty:
+#     sigma_logg = 1/ln(10) * sqrt[(sigma_M/M)^2 +(2 sigma_R/R)^2]
+
+def derive_evolutionary_parameters(
+    mass_min_mjup,
+    mass_max_mjup,
+    radius_min_rjup,
+    radius_max_rjup,
+    logL,
+    logL_error
+):
+
+
+    # Midpoint values
+
+    mass_mid_mjup = (
+        mass_min_mjup + mass_max_mjup ) / 2.0
+
+    radius_mid_rjup = (
+        radius_min_rjup +   radius_max_rjup ) / 2.0
+
+    # uncertanties
+
+    mass_error_mjup = (
+        mass_max_mjup - mass_min_mjup ) / 2.0
+
+    radius_error_rjup = (
+        radius_max_rjup - radius_min_rjup ) / 2.0
+
+    # convert units
+
+    mass_kg = (
+        mass_mid_mjup * M_JUP
+    )
+
+    mass_error_kg = (
+        mass_error_mjup * M_JUP
+    )
+
+    radius_m = (
+        radius_mid_rjup * R_JUP
+    )
+
+    radius_error_m = (
+        radius_error_rjup * R_JUP
+    )
+
+    # Luminosity
+
+    luminosity_w = ( 10.0 ** logL ) * L_SUN
+
+    luminosity_error_w = (
+        np.log(10.0) * luminosity_w * logL_error
+    )
+
+    # effective temperature
+
+    teff = (
+        luminosity_w /
+        ( 4.0 * np.pi * SIGMA_SB * radius_m ** 2 )
+    ) ** 0.25
+
+    # Teff uncertainty from luminosity
+
+    teff_error_lum = (
+        teff * (
+            luminosity_error_w / (4.0 * luminosity_w)
+        )
+    )
+
+    # Teff uncertainty from radius
+
+    teff_error_radius = (
+        teff *
+        ( radius_error_m / (2.0 * radius_m)
+        )
+    )
+
+    # Combine Teff uncertainties in quadrature
+
+    teff_error = np.sqrt(
+        teff_error_lum ** 2 + teff_error_radius ** 2
+    )
+
+    # Surface Gravity
+
+    gravity = (
+        G * mass_kg / radius_m ** 2
+    )
+
+    logg = np.log10(
+        gravity * 100.0
+    )
+
+    # logg uncertainty
+
+    relative_mass_error = (
+        mass_error_kg / mass_kg
+    )
+
+    relative_radius_error = (
+        radius_error_m / radius_m
+    )
+
+    logg_error = (
+        1.0 / np.log(10.0) *
+        np.sqrt( relative_mass_error ** 2 +
+            ( 2.0 * relative_radius_error ) ** 2
+        )
+    )
+
+    # return
+    return {
+        "Evolutionary_Mass_Mid_MJup":
+            mass_mid_mjup,
+
+        "Evolutionary_Mass_Error_MJup":
+            mass_error_mjup,
+
+        "Evolutionary_Radius_Mid_RJup":
+            radius_mid_rjup,
+
+        "Evolutionary_Radius_Error_RJup":
+            radius_error_rjup,
+
+        "Evolutionary_Teff_K":
+            teff,
+
+        "Evolutionary_Teff_Error_K":
+            teff_error,
+
+        "Evolutionary_logg":
+            logg,
+
+        "Evolutionary_logg_Error":
+            logg_error,
+
+        "Absolute_Luminosity_W":
+            luminosity_w,
+
+        "Absolute_Luminosity_Error_W":
+            luminosity_error_w
+    }
+
+
+# label panel
+
+def add_panel_label(
+    ax,
+    text
+):
+
+    ax.text(
+        0.02,
+        0.03,
+        text,
+        transform=ax.transAxes,
+        fontsize=11,
+        ha="left",
+        va="bottom",
+        bbox=dict(
+            boxstyle="round,pad=0.25",
+            facecolor="white",
+            edgecolor="none",
+            alpha=0.65
+        ),
+        zorder=10
+    )
+
+
+# make plots
+
+def make_evolutionary_plots(
+    target,
+    model_name,
+    evo,
+    allowed_tracks,
+    age_min,
+    age_max,
+    logL,
+    logL_error,
+    atmos_radius,
+    atmos_radius_error
+):
+
+    if len(allowed_tracks) == 0:
+
+        print(
+            "No allowed evolutionary "
+            "mass tracks available for plotting."
+        )
+
+        return
+
+    allowed_masses = np.array([
+        item["M"]
+        for item in allowed_tracks
+    ])
+
+    print(
+        "Allowed evolutionary mass tracks:"
+    )
+
+    print(
+        ", ".join(
+            f"{mass * 1000:g} MJup"
+            for mass in allowed_masses
+        )
+    )
+
+    # age limits
+
+    age_span = (
+        age_max -
+        age_min
+    )
+
+    age_padding = max(
+        AGE_PADDING_FRACTION *
+        age_span,
+        MIN_AGE_PADDING
+    )
+
+    zoom_xmin = max(
+        0,
+        age_min -
+        age_padding
+    )
+
+    zoom_xmax = (
+        age_max +
+        age_padding
+    )
+
+    full_xmin = max(
+        0,
+        evo["age"].min()
+    )
+
+    full_xmax = evo["age"].max()
+
+    # luminosity limits
+
+    luminosity_lower = (
+        logL - logL_error
+    )
+
+    luminosity_upper = (
+        logL + logL_error
+    )
+
+    luminosity_span = (
+        luminosity_upper - luminosity_lower
+    )
+
+    minimum_luminosity_span = 0.20
+
+    plotting_luminosity_span = max(
+        luminosity_span,
+        minimum_luminosity_span
+    )
+
+    luminosity_padding = (
+        0.5 * plotting_luminosity_span
+    )
+
+    luminosity_ymin = (
+        logL - plotting_luminosity_span / 2 - luminosity_padding
+    )
+
+    luminosity_ymax = (
+        logL + plotting_luminosity_span / 2 + luminosity_padding
+    )
+
+    # radius limits
+
+    radius_lower = (
+        atmos_radius - atmos_radius_error
+    )
+
+    radius_upper = (
+        atmos_radius + atmos_radius_error
+    )
+
+    radius_span = (
+        radius_upper - radius_lower
+    )
+
+    minimum_radius_span = 0.20
+
+    plotting_radius_span = max(
+        radius_span,
+        minimum_radius_span
+    )
+
+    radius_padding = (
+        0.5 *  plotting_radius_span
+    )
+
+    radius_ymin = max(
+        0.0,
+        atmos_radius - plotting_radius_span / 2 - radius_padding
+    )
+
+    radius_ymax = (
+        atmos_radius +
+        plotting_radius_span / 2 +
+        radius_padding
+    )
+
+    panel_text = (
+        f"{target} - {model_name}"
+    )
+
+    # luminosity plot
+
+    def draw_luminosity_plot(
+        xmin,
+        xmax,
+        suffix
+    ):
+
+        fig, ax = plt.subplots(
+            figsize=(8, 6),
+            dpi=180
+        )
+
+        for item in allowed_tracks:
+
+            mass = item["M"]
+
+            track = evo[
+                evo["M"] == mass
+            ].sort_values(
+                "age"
+            )
+
+            if len(track) == 0:
+                continue
+
+            ax.plot(
+                track["age"],
+                track["logL"],
+                lw=1.5,
+                label=f"{mass * 1000:g} MJup",
+                zorder=2
+            )
+
+        ax.axvspan(
+            age_min,
+            age_max,
+            alpha=0.12,
+            label="Allowed age range",
+            zorder=0
+        )
+
+        ax.axhspan(
+            luminosity_lower,
+            luminosity_upper,
+            alpha=0.30,
+            label=(
+                r"Observed $\log(L_{\rm bol}/L_\odot)$ "
+                r"($1\sigma$)"
+            ),
+            zorder=4
+        )
+
+        ax.axhline(
+            y=logL,
+            linestyle="--",
+            lw=1.2,
+            color="black",
+            label=(
+                r"Observed $\log(L_{\rm bol}/L_\odot)$"
+            ),
+            zorder=5
+        )
+
+        ax.set_xlim(
+            xmin,
+            xmax
+        )
+
+        ax.set_ylim(
+            luminosity_ymin,
+            luminosity_ymax
+        )
+
+        ax.set_xlabel(
+            "Age (Gyr)",
+            fontsize=11
+        )
+
+        ax.set_ylabel(
+            r"$\log(L_{\rm bol}/L_{\odot})$",
+            fontsize=11
+        )
+
+        ax.grid(
+            alpha=0.25,
+            zorder=1
+        )
+
+        add_panel_label(
+            ax,
+            panel_text
+        )
+
+        ax.legend(
+            fontsize=10,
+            ncol=2,
+            loc="best",
+            framealpha=0.7
+        )
+
+        fig.tight_layout()
+
+        output = os.path.join(
+            RESULTS_DIR,
+            f"{target}_{model_name}_"
+            f"Luminosity_{suffix}.png"
+        )
+
+        fig.savefig(
+            output,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+        print(
+            f"Saved luminosity plot:\n"
+            f"    {output}"
+        )
+
+    # radius plot
+
+    def draw_radius_plot(
+        xmin,
+        xmax,
+        suffix
+    ):
+
+        fig, ax = plt.subplots(
+            figsize=(8, 6),
+            dpi=180
+        )
+
+        for item in allowed_tracks:
+
+            mass = item["M"]
+
+            track = evo[
+                evo["M"] == mass
+            ].sort_values(
+                "age"
+            )
+
+            if len(track) == 0:
+                continue
+
+            radius_rjup = (
+                track["R"]   /  0.1028
+            )
+
+            ax.plot(
+                track["age"],
+                radius_rjup,
+                lw=1.5,
+                label=f"{mass * 1000:g} MJup"
+            )
+
+        ax.axhspan(
+            radius_lower,
+            radius_upper,
+            alpha=0.20,
+            label=(
+                "Atmospheric radius "
+                r"$\pm1\sigma$"
+            )
+        )
+
+        ax.axhline(
+            y=atmos_radius,
+            linestyle="--",
+            lw=1.2,
+            color="black",
+            label="Atmospheric radius"
+        )
+
+        ax.axvspan(
+            age_min,
+            age_max,
+            alpha=0.12,
+            label="Allowed age range"
+        )
+
+        ax.set_xlim(
+            xmin,
+            xmax
+        )
+
+        ax.set_ylim(
+            radius_ymin,
+            radius_ymax
+        )
+
+        ax.set_xlabel(
+            "Age (Gyr)",
+            fontsize=11
+        )
+
+        ax.set_ylabel(
+            r"Radius ($R_{\rm Jup}$)",
+            fontsize=11
+        )
+
+        ax.grid(
+            alpha=0.25
+        )
+
+        add_panel_label(
+            ax,
+            panel_text
+        )
+
+        ax.legend(
+            fontsize=10,
+            ncol=2,
+            loc="best",
+            framealpha=0.7
+        )
+
+        fig.tight_layout()
+
+        output = os.path.join(
+            RESULTS_DIR,
+            f"{target}_{model_name}_"
+            f"Radius_{suffix}.png"
+        )
+
+        fig.savefig(
+            output,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+        print(
+            f"Saved radius plot:\n"
+            f"    {output}"
+        )
+
+    # all 4 plots
+
+    draw_luminosity_plot(
+        xmin=full_xmin,
+        xmax=full_xmax,
+        suffix="FULL"
+    )
+
+    draw_luminosity_plot(
+        xmin=zoom_xmin,
+        xmax=zoom_xmax,
+        suffix="ZOOM"
+    )
+
+    draw_radius_plot(
+        xmin=full_xmin,
+        xmax=full_xmax,
+        suffix="FULL"
+    )
+
+    draw_radius_plot(
+        xmin=zoom_xmin,
+        xmax=zoom_xmax,
+        suffix="ZOOM"
+    )
+
+
+# bobcat results
+
+def analyse_bobcat(
+    target
+):
+
+
+    print(
+        f"BOBCAT: {target}"
+    )
+
+
+    atmos_row = bobcat_atmos[
+        bobcat_atmos["Target"] == target
+    ]
+
+    lum_row = luminosity[
+        luminosity["Target"] == target
+    ]
+
+    if atmos_row.empty:
+
+        print(
+            "Atmospheric result not found."
+        )
+
+        return None
+
+    if lum_row.empty:
+
+        print(
+            "Luminosity result not found."
+        )
+
+        return None
+
+    atmos_row = atmos_row.iloc[0]
+    lum_row = lum_row.iloc[0]
+
+    metallicity = atmos_row[
+        "Bobcat [M/H]"
+    ]
+
+    atmos_radius = atmos_row[
+        "Bobcat Radius (RJup)"
+    ]
+
+    atmos_radius_error = atmos_row[
+        "Bobcat Radius Error (RJup)"
+    ]
+
+    logL = lum_row[
+        "log_L_Lsun"
+    ]
+
+    logL_error = lum_row[
+        "log_L_error"
+    ]
+
+    logL_min = (
+        logL - logL_error
+    )
+
+    logL_max = (
+        logL + logL_error
+    )
+
+    age_min, age_max = (
+        AGE_RANGES[target]
+    )
+
+    print(
+        f"Atmospheric [M/H] = "
+        f"{metallicity}"
+    )
+
+    print(
+        f"Atmospheric radius = "
+        f"{atmos_radius:.3f} +/- "
+        f"{atmos_radius_error:.3f} RJup"
+    )
+
+    print(
+        f"log(L/Lsun) = "
+        f"{logL:.4f} +/- "
+        f"{logL_error:.4f}"
+    )
+
+    print(
+        f"Age range = "
+        f"{age_min:g} - "
+        f"{age_max:g} Gyr"
+    )
+
+    evo, used_mh = (
+        load_bobcat_grid(
+            metallicity
+        )
+    )
+
+    # find intersections
+
+    allowed_tracks = (
+        find_allowed_tracks(
+            evo=evo,
+            age_min=age_min,
+            age_max=age_max,
+            logL_min=logL_min,
+            logL_max=logL_max
+        )
+    )
+
+    print(
+        f"Evolutionary mass tracks "
+        f"intersecting BOTH age + luminosity "
+        f"constraints: "
+        f"{len(allowed_tracks)}"
+    )
+
+    # all parameters
+
+    if len(allowed_tracks) > 0:
+
+        mass_min = (
+            min(
+                item["M"]
+                for item in allowed_tracks
+            ) * 1000
+        )
+
+        mass_max = (
+            max(
+                item["M"]
+                for item in allowed_tracks
+            ) * 1000
+        )
+
+        radius_min = (
+            min(
+                item["radius_min"]
+                for item in allowed_tracks
+            ) / 0.1028
+        )
+
+        radius_max = (
+            max(
+                item["radius_max"]
+                for item in allowed_tracks
+            ) / 0.1028
+        )
+
+        # Radius consistency with atmospheric result
+
+        evo_consistent = (
+            atmos_radius +
+            atmos_radius_error
+            >= radius_min
+            and
+            atmos_radius -
+            atmos_radius_error
+            <= radius_max
+        )
+
+        # Derive evolutionary parameters
+
+        evo_parameters = (
+            derive_evolutionary_parameters(
+                mass_min_mjup=mass_min,
+                mass_max_mjup=mass_max,
+                radius_min_rjup=radius_min,
+                radius_max_rjup=radius_max,
+                logL=logL,
+                logL_error=logL_error
+            )
+        )
+
+    else:
+
+        mass_min = np.nan
+        mass_max = np.nan
+
+        radius_min = np.nan
+        radius_max = np.nan
+
+        evo_consistent = False
+
+        evo_parameters = {
+
+            "Evolutionary_Mass_Mid_MJup": np.nan,
+            "Evolutionary_Mass_Error_MJup": np.nan,
+            "Evolutionary_Radius_Mid_RJup": np.nan,
+            "Evolutionary_Radius_Error_RJup": np.nan,
+            "Evolutionary_Teff_K": np.nan,
+            "Evolutionary_Teff_Error_K": np.nan,
+            "Evolutionary_logg": np.nan,
+            "Evolutionary_logg_Error": np.nan,
+            "Absolute_Luminosity_W": np.nan,
+            "Absolute_Luminosity_Error_W": np.nan
+        }
+
+    # print results
+
+    print(
+        f"Evolutionary mass range = "
+        f"{mass_min:.2f} - "
+        f"{mass_max:.2f} MJup"
+    )
+
+    print(
+        f"Evolutionary radius range = "
+        f"{radius_min:.3f} - "
+        f"{radius_max:.3f} RJup"
+    )
+
+    print(
+        f"Atmospheric radius = "
+        f"{atmos_radius:.3f} +/- "
+        f"{atmos_radius_error:.3f} RJup"
+    )
+
+    print(
+        "Radius consistent = "
+        f"{'YES' if evo_consistent else 'NO'}"
+    )
+
+    # parameters
+
+    if len(allowed_tracks) > 0:
+
+        print(
+            "\nDerived evolutionary parameters:"
+        )
+
+        print(
+            f"Evolutionary mass = "
+            f"{evo_parameters['Evolutionary_Mass_Mid_MJup']:.2f}"
+            f" +/- "
+            f"{evo_parameters['Evolutionary_Mass_Error_MJup']:.2f}"
+            f" MJup"
+        )
+
+        print(
+            f"Evolutionary radius = "
+            f"{evo_parameters['Evolutionary_Radius_Mid_RJup']:.3f}"
+            f" +/- "
+            f"{evo_parameters['Evolutionary_Radius_Error_RJup']:.3f}"
+            f" RJup"
+        )
+
+        print(
+            f"Evolutionary Teff = "
+            f"{evo_parameters['Evolutionary_Teff_K']:.0f}"
+            f" +/- "
+            f"{evo_parameters['Evolutionary_Teff_Error_K']:.0f}"
+            f" K"
+        )
+
+        print(
+            f"Evolutionary logg = "
+            f"{evo_parameters['Evolutionary_logg']:.3f}"
+            f" +/- "
+            f"{evo_parameters['Evolutionary_logg_Error']:.3f}"
+        )
+
+    if len(allowed_tracks) > 0:
+
+        print(
+            "\nAllowed evolutionary mass tracks:"
+        )
+
+        print(
+            ", ".join(
+                f"{item['M'] * 1000:g}"
+                for item in allowed_tracks
+            )
+            + " MJup"
+        )
+
+    # plots
+
+    make_evolutionary_plots(
+        target=target,
+        model_name="Bobcat",
+        evo=evo,
+        allowed_tracks=allowed_tracks,
+        age_min=age_min,
+        age_max=age_max,
+        logL=logL,
+        logL_error=logL_error,
+        atmos_radius=atmos_radius,
+        atmos_radius_error=atmos_radius_error
+    )
+
+    # return results
+
+    return {
+
+        "Target":
+            target,
+
+        "Age_min_Gyr":
+            age_min,
+
+        "Age_max_Gyr":
+            age_max,
+
+        "log_L_Lsun":
+            logL,
+
+        "log_L_error":
+            logL_error,
+
+        "Bobcat_MH":
+            metallicity,
+
+        "Bobcat_evolutionary_MH":
+            used_mh,
+
+        "Bobcat_Atmos_Radius_RJup":
+            atmos_radius,
+
+        "Bobcat_Atmos_Radius_Error_RJup":
+            atmos_radius_error,
+
+        "Bobcat_Evo_Mass_Min_MJup":
+            mass_min,
+
+        "Bobcat_Evo_Mass_Max_MJup":
+            mass_max,
+
+        "Bobcat_Evo_Mass_Mid_MJup":
+            evo_parameters[
+                "Evolutionary_Mass_Mid_MJup"
+            ],
+
+        "Bobcat_Evo_Mass_Error_MJup":
+            evo_parameters[
+                "Evolutionary_Mass_Error_MJup"
+            ],
+
+        "Bobcat_Evo_Radius_Min_RJup":
+            radius_min,
+
+        "Bobcat_Evo_Radius_Max_RJup":
+            radius_max,
+
+        "Bobcat_Evo_Radius_Mid_RJup":
+            evo_parameters[
+                "Evolutionary_Radius_Mid_RJup"
+            ],
+
+        "Bobcat_Evo_Radius_Error_RJup":
+            evo_parameters[
+                "Evolutionary_Radius_Error_RJup"
+            ],
+
+        "Bobcat_Evolutionary_Teff_K":
+            evo_parameters[
+                "Evolutionary_Teff_K"
+            ],
+
+        "Bobcat_Evolutionary_Teff_Error_K":
+            evo_parameters[
+                "Evolutionary_Teff_Error_K"
+            ],
+
+        "Bobcat_Evolutionary_logg":
+            evo_parameters[
+                "Evolutionary_logg"
+            ],
+
+        "Bobcat_Evolutionary_logg_Error":
+            evo_parameters[
+                "Evolutionary_logg_Error"
+            ],
+
+        "Bobcat_Radius_Consistent":
+            evo_consistent
+    }
+
+
+# red dimaondback results
+
+def analyse_diamondback(
+    target
+):
+
+
+    print(
+        f"RED DIAMONDBACK: {target}"
+    )
+
+
+    atmos_row = diamondback_atmos[
+        diamondback_atmos["Target"] == target
+    ]
+
+    lum_row = luminosity[
+        luminosity["Target"] == target
+    ]
+
+    if atmos_row.empty:
+
+        print(
+            "Atmospheric result not found."
+        )
+
+        return None
+
+    if lum_row.empty:
+
+        print(
+            "Luminosity result not found."
+        )
+
+        return None
+
+    atmos_row = atmos_row.iloc[0]
+    lum_row = lum_row.iloc[0]
+
+    metallicity = atmos_row[
+        "Diamondback [M/H]"
+    ]
+
+    atmos_radius = atmos_row[
+        "Diamondback Radius (RJup)"
+    ]
+
+    atmos_radius_error = atmos_row[
+        "Diamondback Radius Error (RJup)"
+    ]
+
+    logL = lum_row[
+        "log_L_Lsun"
+    ]
+
+    logL_error = lum_row[
+        "log_L_error"
+    ]
+
+    logL_min = (
+        logL -
+        logL_error
+    )
+
+    logL_max = (
+        logL +
+        logL_error
+    )
+
+    age_min, age_max = (
+        AGE_RANGES[target]
+    )
+
+    print(
+        f"Atmospheric [M/H] = "
+        f"{metallicity}"
+    )
+
+    print(
+        f"Atmospheric radius = "
+        f"{atmos_radius:.3f} +/- "
+        f"{atmos_radius_error:.3f} RJup"
+    )
+
+    print(
+        f"log(L/Lsun) = "
+        f"{logL:.4f} +/- "
+        f"{logL_error:.4f}"
+    )
+
+    print(
+        f"Age range = "
+        f"{age_min:g} - "
+        f"{age_max:g} Gyr"
+    )
+
+    evo, used_mh = (
+        load_diamondback_grid(
+            metallicity
+        )
+    )
+
+    # Find mass track intersections
+
+    allowed_tracks = (
+        find_allowed_tracks(
+            evo=evo,
+            age_min=age_min,
+            age_max=age_max,
+            logL_min=logL_min,
+            logL_max=logL_max
+        )
+    )
+
+    print(
+        f"Evolutionary mass tracks "
+        f"intersecting BOTH age + luminosity "
+        f"constraints: "
+        f"{len(allowed_tracks)}"
+    )
+
+    # parameters
+
+    if len(allowed_tracks) > 0:
+
+        mass_min = (
+            min(
+                item["M"]
+                for item in allowed_tracks
+            )  * 1000
+        )
+
+        mass_max = (
+            max(
+                item["M"]
+                for item in allowed_tracks
+            )  * 1000
+        )
+
+        radius_min = (
+            min(
+                item["radius_min"]
+                for item in allowed_tracks
+            ) / 0.1028
+        )
+
+        radius_max = (
+            max(
+                item["radius_max"]
+                for item in allowed_tracks
+            ) / 0.1028
+        )
+
+        # Radius consistency
+
+        evo_consistent = (
+            atmos_radius +
+            atmos_radius_error
+            >= radius_min
+            and
+            atmos_radius -
+            atmos_radius_error
+            <= radius_max
+        )
+
+        # Derive evolutionary parameters
+
+        evo_parameters = (
+            derive_evolutionary_parameters(
+                mass_min_mjup=mass_min,
+                mass_max_mjup=mass_max,
+                radius_min_rjup=radius_min,
+                radius_max_rjup=radius_max,
+                logL=logL,
+                logL_error=logL_error
+            )
+        )
+
+    else:
+
+        mass_min = np.nan
+        mass_max = np.nan
+
+        radius_min = np.nan
+        radius_max = np.nan
+
+        evo_consistent = False
+
+        evo_parameters = {
+
+            "Evolutionary_Mass_Mid_MJup": np.nan,
+            "Evolutionary_Mass_Error_MJup": np.nan,
+            "Evolutionary_Radius_Mid_RJup": np.nan,
+            "Evolutionary_Radius_Error_RJup": np.nan,
+            "Evolutionary_Teff_K": np.nan,
+            "Evolutionary_Teff_Error_K": np.nan,
+            "Evolutionary_logg": np.nan,
+            "Evolutionary_logg_Error": np.nan,
+            "Absolute_Luminosity_W": np.nan,
+            "Absolute_Luminosity_Error_W": np.nan
+        }
+
+    # print results
+
+    print(
+        f"Evolutionary mass range = "
+        f"{mass_min:.2f} - "
+        f"{mass_max:.2f} MJup"
+    )
+
+    print(
+        f"Evolutionary radius range = "
+        f"{radius_min:.3f} - "
+        f"{radius_max:.3f} RJup"
+    )
+
+    print(
+        f"Atmospheric radius = "
+        f"{atmos_radius:.3f} +/- "
+        f"{atmos_radius_error:.3f} RJup"
+    )
+
+    print(
+        "Radius consistent = "
+        f"{'YES' if evo_consistent else 'NO'}"
+    )
+
+    if len(allowed_tracks) > 0:
+
+        print(
+            "\nDerived evolutionary parameters:"
+        )
+
+        print(
+            f"Evolutionary mass = "
+            f"{evo_parameters['Evolutionary_Mass_Mid_MJup']:.2f}"
+            f" +/- "
+            f"{evo_parameters['Evolutionary_Mass_Error_MJup']:.2f}"
+            f" MJup"
+        )
+
+        print(
+            f"Evolutionary radius = "
+            f"{evo_parameters['Evolutionary_Radius_Mid_RJup']:.3f}"
+            f" +/- "
+            f"{evo_parameters['Evolutionary_Radius_Error_RJup']:.3f}"
+            f" RJup"
+        )
+
+        print(
+            f"Evolutionary Teff = "
+            f"{evo_parameters['Evolutionary_Teff_K']:.0f}"
+            f" +/- "
+            f"{evo_parameters['Evolutionary_Teff_Error_K']:.0f}"
+            f" K"
+        )
+
+        print(
+            f"Evolutionary logg = "
+            f"{evo_parameters['Evolutionary_logg']:.3f}"
+            f" +/- "
+            f"{evo_parameters['Evolutionary_logg_Error']:.3f}"
+        )
+
+    if len(allowed_tracks) > 0:
+
+        print(
+            "\nAllowed evolutionary mass tracks:"
+        )
+
+        print(
+            ", ".join(
+                f"{item['M'] * 1000:g}"
+                for item in allowed_tracks
+            )
+            + " MJup"
+        )
+
+    # plots
+
+    make_evolutionary_plots(
+        target=target,
+        model_name="Red Diamondback",
+        evo=evo,
+        allowed_tracks=allowed_tracks,
+        age_min=age_min,
+        age_max=age_max,
+        logL=logL,
+        logL_error=logL_error,
+        atmos_radius=atmos_radius,
+        atmos_radius_error=atmos_radius_error
+    )
+
+    # return results
+
+    return {
+
+        "Target":
+            target,
+
+        "Age_min_Gyr":
+            age_min,
+
+        "Age_max_Gyr":
+            age_max,
+
+        "log_L_Lsun":
+            logL,
+
+        "log_L_error":
+            logL_error,
+
+        "Diamondback_MH":
+            metallicity,
+
+        "Diamondback_evolutionary_MH":
+            used_mh,
+
+        "Diamondback_Atmos_Radius_RJup":
+            atmos_radius,
+
+        "Diamondback_Atmos_Radius_Error_RJup":
+            atmos_radius_error,
+
+        "Diamondback_Evo_Mass_Min_MJup":
+            mass_min,
+
+        "Diamondback_Evo_Mass_Max_MJup":
+            mass_max,
+
+        "Diamondback_Evo_Mass_Mid_MJup":
+            evo_parameters[
+                "Evolutionary_Mass_Mid_MJup"
+            ],
+
+        "Diamondback_Evo_Mass_Error_MJup":
+            evo_parameters[
+                "Evolutionary_Mass_Error_MJup"
+            ],
+
+        "Diamondback_Evo_Radius_Min_RJup":
+            radius_min,
+
+        "Diamondback_Evo_Radius_Max_RJup":
+            radius_max,
+
+        "Diamondback_Evo_Radius_Mid_RJup":
+            evo_parameters[
+                "Evolutionary_Radius_Mid_RJup"
+            ],
+
+        "Diamondback_Evo_Radius_Error_RJup":
+            evo_parameters[
+                "Evolutionary_Radius_Error_RJup"
+            ],
+
+        "Diamondback_Evolutionary_Teff_K":
+            evo_parameters[
+                "Evolutionary_Teff_K"
+            ],
+
+        "Diamondback_Evolutionary_Teff_Error_K":
+            evo_parameters[
+                "Evolutionary_Teff_Error_K"
+            ],
+
+        "Diamondback_Evolutionary_logg":
+            evo_parameters[
+                "Evolutionary_logg"
+            ],
+
+        "Diamondback_Evolutionary_logg_Error":
+            evo_parameters[
+                "Evolutionary_logg_Error"
+            ],
+
+        "Diamondback_Radius_Consistent":
+            evo_consistent
+    }
+
+
+# run all targets
+
+targets = list(
+    AGE_RANGES.keys()
+)
+
+bobcat_results = []
+diamondback_results = []
+
+
+# run bobcat
+
+for target in targets:
+
+    result = analyse_bobcat(
+        target
+    )
+
+    if result is not None:
+
+        bobcat_results.append(
+            result
+        )
+
+
+# run red diamondback
+
+for target in targets:
+
+    result = analyse_diamondback(
+        target
+    )
+
+    if result is not None:
+
+        diamondback_results.append(
+            result
+        )
+
+
+# save bobcat results
+
+bobcat_results_df = pd.DataFrame(
+    bobcat_results
+)
+
+bobcat_output = os.path.join(
+    RESULTS_DIR,
+    "TEST/FINAL_BOBCAT_EVOLUTIONARY_COMPARISON.csv"
+)
+
+bobcat_results_df.to_csv(
+    bobcat_output,
+    index=False
+)
+
+
+# save diamondback results
+
+diamondback_results_df = pd.DataFrame(
+    diamondback_results
+)
+
+diamondback_output = os.path.join(
+    RESULTS_DIR,
+    "TEST/FINAL_DIAMONDBACK_EVOLUTIONARY_COMPARISON.csv"
+)
+
+diamondback_results_df.to_csv(
+    diamondback_output,
+    index=False
+)
+
+
+# combined summary
+
+combined = pd.merge(
+    bobcat_results_df,
+    diamondback_results_df,
+    on=[
+        "Target",
+        "Age_min_Gyr",
+        "Age_max_Gyr",
+        "log_L_Lsun",
+        "log_L_error"
+    ],
+    how="outer"
+)
+
+combined_output = os.path.join(
+    RESULTS_DIR,
+    "TEST/FINAL_BOBCAT_DIAMONDBACK_EVOLUTIONARY_COMPARISON.csv"
+)
+
+combined.to_csv(
+    combined_output,
+    index=False
+)
+
+
+# bobcat summary
+
+print("\nBOBCAT RESULTS")
+
+print("-" * 100)
+
+print(
+    bobcat_results_df[
+        [
+            "Target",
+            "Age_min_Gyr",
+            "Age_max_Gyr",
+            "log_L_Lsun",
+            "log_L_error",
+
+            "Bobcat_Evo_Mass_Min_MJup",
+            "Bobcat_Evo_Mass_Max_MJup",
+            "Bobcat_Evo_Mass_Mid_MJup",
+            "Bobcat_Evo_Mass_Error_MJup",
+
+            "Bobcat_Evo_Radius_Min_RJup",
+            "Bobcat_Evo_Radius_Max_RJup",
+            "Bobcat_Evo_Radius_Mid_RJup",
+            "Bobcat_Evo_Radius_Error_RJup",
+
+            "Bobcat_Evolutionary_Teff_K",
+            "Bobcat_Evolutionary_Teff_Error_K",
+
+            "Bobcat_Evolutionary_logg",
+            "Bobcat_Evolutionary_logg_Error",
+
+            "Bobcat_Radius_Consistent"
+        ]
+    ].to_string(
+        index=False
+    )
+)
+
+
+# red dimaondback summary
+
+print("\n")
+
+print(
+    "RED DIAMONDBACK RESULTS"
+)
+
+
+print(
+    diamondback_results_df[
+        [
+            "Target",
+            "Age_min_Gyr",
+            "Age_max_Gyr",
+            "log_L_Lsun",
+            "log_L_error",
+
+            "Diamondback_Evo_Mass_Min_MJup",
+            "Diamondback_Evo_Mass_Max_MJup",
+            "Diamondback_Evo_Mass_Mid_MJup",
+            "Diamondback_Evo_Mass_Error_MJup",
+
+            "Diamondback_Evo_Radius_Min_RJup",
+            "Diamondback_Evo_Radius_Max_RJup",
+            "Diamondback_Evo_Radius_Mid_RJup",
+            "Diamondback_Evo_Radius_Error_RJup",
+
+            "Diamondback_Evolutionary_Teff_K",
+            "Diamondback_Evolutionary_Teff_Error_K",
+
+            "Diamondback_Evolutionary_logg",
+            "Diamondback_Evolutionary_logg_Error",
+
+            "Diamondback_Radius_Consistent"
+        ]
+    ].to_string(
+        index=False
+    )
+)
+
+
+print(
+    f"\nCombined:\n"
+    f"{combined_output}"
+)
+
+print(
+    f"\nPlots saved in:\n"
+    f"{RESULTS_DIR}"
+)
+
+print("\nFinished.")
