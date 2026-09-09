@@ -1,0 +1,1695 @@
+# Sonora ElfOwl atmospheric model fitting
+# For each target the script:
+# Loads the JWST spectrum
+# Finds the available ElfOwl models
+# Checks wavelength coverage
+# Convolves each model to the JWST resolution
+# Finds the best R^2 / D^2 scaling factor
+# Calculates reduced chi-squared
+# Identifies the best-fitting model
+# Calculates the atmospheric radius
+# Estimates the radius uncertainty
+#  Produces a best-fit spectrum plot
+#  Saves one final CSV containing the best-fit parameters
+
+
+# Import packages
+
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+import re
+import time
+import xarray as xr
+
+
+#  Physical constants
+
+# Conversion from parsecs to meters
+PC_TO_M = 3.085677581e16
+
+# Jupiter radius in meters
+RJUP = 71492e3
+
+
+# Model and convolution settings
+
+MODEL_RESOLUTION = 3.3
+
+GAUSSIAN_SIGMA_LIMIT = 4.0
+
+WAVELENGTH_TOLERANCE = 1e-6
+
+
+# Temperature settings
+
+# If False, use every temperature available in the NEW
+# ElfOwl grid.
+
+# If True, only use temperatures within +/- TEMPERATURE_WINDOW
+# of the reference/literature temperature.
+
+USE_TEMPERATURE_WINDOW = False
+
+TEMPERATURE_WINDOW = 300
+
+
+# File locations
+
+elfowl_folder = (
+   ...
+)
+
+spectrum_folder = (
+    ...
+)
+
+output_folder = (
+   ...
+)
+
+plots_folder = os.path.join(
+    output_folder,
+    "Plots"
+)
+
+
+# Target information
+
+targets = pd.DataFrame({
+
+    "Target": [
+        "CW2106",
+        "GJ499C",
+        "HD16270B",
+        "HD37216B",
+        "HD46588B",
+        "HD89744B",
+        "HIP9269B",
+        "HIP38939B",
+        "HNPEGB",
+        "LSPMJ0632B",
+        "NLT1011B",
+        "SDSS1416"
+    ],
+
+    "Distance": [
+        34.112,
+        19.703,
+        21.236,
+        28.131,
+        18.202,
+        38.560,
+        24.727,
+        18.466,
+        18.133,
+        82.580,
+        55.128,
+        46.864
+    ],
+
+    "Distance Error": [
+        0.016,
+        0.022,
+        0.010,
+        0.016,
+        0.020,
+        0.065,
+        0.016,
+        0.006,
+        0.011,
+        0.130,
+        0.051,
+        0.037
+    ],
+
+    "Reference Teff": [
+        1300,
+        1600,
+        2200,
+        2000,
+        1300,
+        2200,
+        1500,
+        1100,
+        1200,
+        2200,
+        1800,
+        1600
+    ]
+
+})
+
+
+# Plot formatting
+
+plt.rcParams.update({
+
+    "font.size": 15,
+
+    "axes.labelsize": 15,
+
+    "xtick.labelsize": 15,
+
+    "ytick.labelsize": 15,
+
+    "legend.fontsize": 12
+
+})
+
+
+# Find all ElfOwl models
+
+def find_elfowl_models():
+
+
+    model_files = []
+
+    # search the five temperature directories.
+
+    temperature_directories = [
+
+        "teff_1000_1200",
+        "teff_1300_1500",
+        "teff_1600_1800",
+        "teff_1900_2100",
+        "teff_2200_2400"
+
+    ]
+
+    print()
+    print("Searching ElfOwl model directories")
+
+    for directory_name in temperature_directories:
+
+        directory = os.path.join(
+
+            elfowl_folder,
+
+            directory_name
+
+        )
+
+        if not os.path.isdir(directory):
+
+            print()
+            print(
+                f"WARNING: Directory not found:"
+            )
+
+            print(
+                directory
+            )
+
+            continue
+
+        files_in_directory = []
+
+        for filename in os.listdir(directory):
+
+            if (
+
+                filename.startswith("spectra_")
+
+                and
+
+                filename.endswith(".nc")
+
+            ):
+
+                files_in_directory.append(
+
+                    os.path.join(
+                        directory,
+                        filename
+                    )
+
+                )
+
+        files_in_directory.sort()
+
+        model_files.extend(
+            files_in_directory
+        )
+
+        print(
+
+            f"{directory_name}: "
+            f"{len(files_in_directory)} models"
+
+        )
+
+    model_files.sort()
+
+    print()
+    print(
+        f"TOTAL ELFOWL MODELS FOUND: "
+        f"{len(model_files)}"
+    )
+
+
+# Extract parameters from an ElfOwl filename
+
+def parse_elfowl_filename(filepath):
+
+    #Extract atmospheric parameters from an ElfOwl filename.
+
+    #Expected format:
+        #spectra_logzz_2.0_teff_1600.0_grav_17.0_mh_0.7_co_0.5.nc
+
+    #Parameters:logKzz, Teff, gravity, [M/H], C/O
+
+    #ElfOwl gravity is given in m/s^2.
+        #g_cgs = g_SI * 100
+        #logg = log10(g_cgs)
+
+    filename = os.path.basename(
+        filepath
+    )
+
+    try:
+
+        logkzz = float(
+            re.search(
+                r"logzz_(-?\d+(?:\.\d+)?)",
+                filename
+            ).group(1)
+        )
+
+        teff = float(
+            re.search(
+                r"teff_(-?\d+(?:\.\d+)?)",
+                filename
+            ).group(1)
+        )
+
+        gravity = float(
+            re.search(
+                r"grav_(-?\d+(?:\.\d+)?)",
+                filename
+            ).group(1)
+        )
+
+        mh = float(
+            re.search(
+                r"mh_(-?\d+(?:\.\d+)?)",
+                filename
+            ).group(1)
+        )
+
+        co = float(
+            re.search(
+                r"co_(-?\d+(?:\.\d+)?)",
+                filename
+            ).group(1)
+        )
+
+        gravity_cgs = gravity * 100.0
+
+        logg = np.log10(
+            gravity_cgs
+        )
+
+        return {
+
+            "Teff": teff,
+
+            "logg": logg,
+
+            "gravity": gravity,
+
+            "MH": mh,
+
+            "CO": co,
+
+            "logKzz": logkzz
+
+        }
+
+    except Exception:
+
+        return None
+
+
+# Load a JWST spectrum
+
+def load_jwst_spectrum(target_name):
+
+    filepath = os.path.join(
+
+        spectrum_folder,
+
+        f"{target_name}_spectrum.txt"
+
+    )
+
+    data = np.loadtxt(
+        filepath
+    )
+
+    jwst_wavelength = data[:, 0]
+
+    jwst_flux = data[:, 1]
+
+    jwst_uncertainty = data[:, 2]
+
+    valid = (
+
+        np.isfinite(jwst_wavelength)
+
+        &
+
+        np.isfinite(jwst_flux)
+
+        &
+
+        np.isfinite(jwst_uncertainty)
+
+        &
+
+        (jwst_wavelength > 0)
+
+        &
+
+        (jwst_uncertainty > 0)
+
+    )
+
+    jwst_wavelength = jwst_wavelength[valid]
+
+    jwst_flux = jwst_flux[valid]
+
+    jwst_uncertainty = jwst_uncertainty[valid]
+
+    order = np.argsort(
+        jwst_wavelength
+    )
+
+    jwst_wavelength = jwst_wavelength[order]
+
+    jwst_flux = jwst_flux[order]
+
+    jwst_uncertainty = jwst_uncertainty[order]
+
+    return np.array([
+
+        jwst_wavelength,
+        jwst_flux,
+        jwst_uncertainty
+
+    ])
+
+
+# Load an ElfOwl model spectrum
+
+def load_elfowl_spectrum(filepath):
+    with xr.open_dataset(filepath) as dataset:
+        wavelength = np.asarray(dataset["wavelength"].values).squeeze()
+        flux = np.asarray(dataset["flux"].values).squeeze()
+
+    order = np.argsort(wavelength)
+
+    wavelength = wavelength[order]
+    flux = flux[order]
+
+    return np.array([wavelength, flux])
+
+# Convert ElfOwl flux into JWST units
+
+def elfowl_to_jwst_units(flux):
+
+    
+    #Convert:
+        #erg cm^-2 s^-1 cm^-1
+    #to:
+        #W m^-2 micron^-1
+
+    return flux * 1e-7
+
+
+# Check model wavelength coverage
+
+def has_full_coverage(
+
+    model_wavelength,
+    jwst_wavelength
+
+):
+
+    model_min = np.min(
+        model_wavelength
+    )
+
+    model_max = np.max(
+        model_wavelength
+    )
+
+    jwst_min = np.min(
+        jwst_wavelength
+    )
+
+    jwst_max = np.max(
+        jwst_wavelength
+    )
+
+    return (
+
+        model_min
+        <=
+        jwst_min + WAVELENGTH_TOLERANCE
+
+        and
+
+        model_max
+        >=
+        jwst_max - WAVELENGTH_TOLERANCE
+
+    )
+
+
+# Convolve model to JWST resolution
+
+def convolve_model(
+
+    obspec,
+    modspec,
+    resolution=MODEL_RESOLUTION
+
+):
+
+    jwst_wavelength = obspec[0]
+
+    model_wavelength = modspec[0]
+
+    model_flux = modspec[1]
+
+    number_of_observed_points = len(
+        jwst_wavelength
+    )
+
+    convolved_flux = np.zeros(
+        number_of_observed_points
+    )
+
+    delta_previous = np.abs(
+
+        jwst_wavelength
+        -
+        np.roll( jwst_wavelength, 1
+        )
+    )
+
+    delta_next = np.abs(
+
+        jwst_wavelength
+        -
+        np.roll(
+            jwst_wavelength,
+            -1
+        )
+
+    )
+
+    local_delta_wavelength = ( 0.5 * ( delta_previous + delta_next )
+
+    )
+
+    if number_of_observed_points > 2:
+
+        local_delta_wavelength[0] = (
+            local_delta_wavelength[1]
+        )
+
+        local_delta_wavelength[-1] = (
+            local_delta_wavelength[-2]
+        )
+
+    for i in range(
+        number_of_observed_points
+    ):
+
+        current_wavelength = (
+            jwst_wavelength[i]
+        )
+
+        current_delta_wavelength = (
+            local_delta_wavelength[i]
+        )
+
+        sigma = (
+
+            current_delta_wavelength * resolution / 2.355
+
+        )
+
+        if (
+
+            not np.isfinite(sigma)
+
+            or
+
+            sigma <= 0
+
+        ):
+
+            convolved_flux[i] = np.interp(
+
+                current_wavelength,
+
+                model_wavelength,
+
+                model_flux
+
+            )
+
+            continue
+
+        lower_wavelength = (
+
+            current_wavelength  - GAUSSIAN_SIGMA_LIMIT  *  sigma
+
+        )
+
+        upper_wavelength = (
+
+            current_wavelength + GAUSSIAN_SIGMA_LIMIT * sigma
+
+        )
+
+        left_index = np.searchsorted(
+
+            model_wavelength,
+
+            lower_wavelength,
+
+            side="left"
+
+        )
+
+        right_index = np.searchsorted(
+
+            model_wavelength,
+
+            upper_wavelength,
+
+            side="right"
+
+        )
+
+        if right_index <= left_index:
+
+            convolved_flux[i] = np.interp(
+
+                current_wavelength,
+
+                model_wavelength,
+
+                model_flux
+
+            )
+
+            continue
+
+        local_wavelength = model_wavelength[
+            left_index:right_index
+        ]
+
+        local_flux = model_flux[
+            left_index:right_index
+        ]
+
+        gaussian = np.exp(
+
+            -(( local_wavelength - current_wavelength )**2 )
+            /
+            ( 2 * sigma**2 ) )
+
+        gaussian_sum = np.sum(
+            gaussian
+        )
+
+        if (
+
+            not np.isfinite(
+                gaussian_sum
+            )
+
+            or
+
+            gaussian_sum <= 0
+
+        ):
+
+            convolved_flux[i] = np.interp(
+
+                current_wavelength,
+
+                model_wavelength,
+
+                model_flux
+
+            )
+
+            continue
+
+        gaussian /= gaussian_sum
+
+        convolved_flux[i] = np.sum(
+
+            gaussian
+            *
+            local_flux
+
+        )
+
+    return convolved_flux
+
+
+# 15. Calculate chi-squared and R^2 / D^2 scaling
+
+
+def calculate_chi2(
+
+    obspec,
+    modspec
+
+):
+
+    convolved_model = convolve_model(
+
+        obspec,
+        modspec
+
+    )
+
+    if not np.all(
+        np.isfinite(
+            convolved_model
+        )
+    ):
+
+        return (
+            np.inf,
+            np.nan,
+            None
+        )
+
+    numerator = np.sum(
+        obspec[1] * convolved_model / obspec[2]**2
+    )
+
+    denominator = np.sum(
+        convolved_model**2
+        /
+        obspec[2]**2
+    )
+
+    if (
+
+        denominator <= 0
+        or
+        not np.isfinite(
+            denominator
+        )
+    ):
+
+        return (
+            np.inf,
+            np.nan,
+            None
+        )
+
+    R2D2 = (
+        numerator / denominator
+    )
+
+    if (
+
+        R2D2 <= 0
+        or
+        not np.isfinite(
+            R2D2
+        )
+    ):
+        return (
+            np.inf,
+            np.nan,
+            None
+        )
+
+    residuals = ( obspec[1] - R2D2 * convolved_model ) / obspec[2]
+
+    raw_chi2 = np.sum(
+        residuals**2
+    )
+
+    number_of_points = len(
+        obspec[0]
+    )
+
+    reduced_chi2 = (
+        raw_chi2  / number_of_points
+    )
+
+    return (
+        reduced_chi2,
+        R2D2,
+        convolved_model
+    )
+
+# radius uncertainty 
+
+def monte_carlo_radius(
+    obspec,
+    model_flux,
+    best_radius,
+    best_R2D2,
+    distance_pc,
+    distance_error_pc,
+    n_samples=1000
+):
+
+    radius_samples = []
+
+    denominator = np.sum(
+        model_flux**2 / obspec[2]**2
+    )
+
+    if denominator <= 0:
+
+        return np.nan
+
+    for _ in range(
+        n_samples
+    ):
+        flux_sample = (
+            obspec[1] + np.random.normal(0, obspec[2])
+        )
+
+        distance_sample = np.random.normal(
+
+            distance_pc,
+            distance_error_pc
+        )
+
+        if distance_sample <= 0:
+
+            continue
+
+        numerator = np.sum(
+
+            flux_sample * model_flux / obspec[2]**2
+        )
+
+        R2D2_sample = (
+            numerator / denominator
+
+        )
+
+        if R2D2_sample <= 0:
+            continue
+
+        radius_sample = (
+            best_radius * np.sqrt( R2D2_sample/best_R2D2)
+            * distance_sample / distance_pc
+        )
+
+        radius_samples.append(
+            radius_sample
+        )
+
+    if len(radius_samples) < 2:
+
+        return np.nan
+
+    return np.std(
+        radius_samples
+    )
+
+# Select temperature grid
+
+def select_temperature_grid(
+
+    all_models,
+    reference_teff
+
+):
+    available_temperatures = []
+
+    for filepath in all_models:
+
+        params = parse_elfowl_filename(
+            filepath
+        )
+
+        if params is None:
+
+            continue
+
+        available_temperatures.append(
+            params["Teff"]
+        )
+
+    available_temperatures = np.array(
+
+        sorted(
+            np.unique(
+                available_temperatures
+            )
+        )
+    )
+
+    if not USE_TEMPERATURE_WINDOW:
+        return available_temperatures
+
+    lower_temperature = (
+        reference_teff - TEMPERATURE_WINDOW
+    )
+
+    upper_temperature = (
+        reference_teff +  TEMPERATURE_WINDOW
+    )
+
+    selected_temperatures = (
+        available_temperatures[
+            (
+                available_temperatures
+                >=
+                lower_temperature
+            )
+            &
+            (
+                available_temperatures
+                <=
+                upper_temperature
+            )
+        ]
+    )
+
+    return selected_temperatures
+
+
+# Plot best-fitting spectrum
+
+
+def plot_best_fit(
+
+    obspec,
+    best_model,
+    best_flux,
+    target_name
+
+):
+
+    plt.figure(
+        figsize=(11, 6)
+    )
+
+    ax = plt.gca()
+
+    ax.plot(
+
+        obspec[0],
+        obspec[1],
+        color="black",
+        lw=1.5,
+        label="JWST spectrum"
+    )
+
+    ax.plot(
+
+        obspec[0],
+        best_flux,
+        lw=2,
+        label="Best-fitting Sonora ElfOwl model"
+    )
+
+    ax.set_yscale(
+        "log"
+    )
+
+    ax.set_xlabel(
+        "Wavelength (μm)"
+    )
+
+    ax.set_ylabel(
+        r"Flux (W m$^{-2}$ μm$^{-1}$)"
+    )
+
+    ax.set_title(
+        f"{target_name} — Sonora ElfOwl"
+    )
+
+    ax.legend(
+        loc="upper right"
+    )
+
+    parameter_text = (
+
+        f"$T_{{eff}}$ = "
+        f"{best_model['Teff']:.0f} K\n"
+
+        f"log(g) = "
+        f"{best_model['logg']:.2f}\n"
+
+        f"[M/H] = "
+        f"{best_model['MH']:.1f}\n"
+
+        f"C/O = "
+        f"{best_model['CO']:.1f}\n"
+
+        f"logKzz = "
+        f"{best_model['logKzz']:.1f}\n"
+
+        f"Reduced χ² = "
+        f"{best_model['chi2']:.2f}\n"
+
+        f"Radius = "
+        f"{best_model['radius']:.3f} "
+        f"$R_{{Jup}}$"
+
+    )
+
+    ax.text(
+
+        0.98,
+        0.72,
+
+        parameter_text,
+        transform=ax.transAxes,
+        fontsize=12,
+        verticalalignment="top",
+        horizontalalignment="right",
+        bbox=dict(
+            boxstyle="round",
+            facecolor="white",
+            edgecolor="black",
+            alpha=0.9
+        )
+    )
+
+    plt.tight_layout()
+
+    filename = (
+
+        f"{target_name}_"
+        "ElfOwl_BestFit.png"
+    )
+
+    filepath = os.path.join(
+        plots_folder,
+        filename
+    )
+
+    plt.savefig(
+        filepath,
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close()
+    return filepath
+
+
+# Fit the complete ElfOwl grid
+
+def fit_elfowl_grid(
+
+    obspec,
+    distance_pc,
+    distance_error_pc,
+    reference_teff,
+    all_models
+
+):
+
+    distance_m = (
+
+        distance_pc *  PC_TO_M
+    )
+
+    jwst_wavelength = obspec[0]
+
+    jwst_min = np.min(
+        jwst_wavelength
+    )
+
+    jwst_max = np.max(
+        jwst_wavelength
+    )
+
+    selected_temperatures = (
+        select_temperature_grid(
+            all_models,
+            reference_teff
+
+        )
+    )
+
+    print()
+    print(
+        "Temperatures selected:"
+    )
+
+    print(
+        selected_temperatures.astype(int)
+    )
+
+    selected_models = []
+
+    for filepath in all_models:
+
+        params = parse_elfowl_filename(
+            filepath
+        )
+
+        if params is None:
+            continue
+
+        if any(
+            np.isclose(
+                params["Teff"],
+                temperature,
+                atol=0.01
+            )
+
+            for temperature in
+            selected_temperatures
+
+        ):
+
+            selected_models.append(
+                (
+                    filepath,
+                    params
+                )
+
+            )
+
+    print()
+    print(
+        f"Models selected: "
+        f"{len(selected_models)}"
+    )
+
+    print(
+
+        f"JWST wavelength range: "
+        f"{jwst_min:.3f} - "
+        f"{jwst_max:.3f} μm"
+
+    )
+
+    results = []
+
+    number_skipped = 0
+    number_fitted = 0
+    number_bad = 0
+
+    for index, (
+        filepath,
+        params
+
+    ) in enumerate(
+
+        selected_models,
+        start=1
+
+    ):
+
+        filename = os.path.basename(
+            filepath
+        )
+
+        try:
+
+            model_spectrum = (
+                load_elfowl_spectrum(
+                    filepath
+                )
+            )
+
+            model_wavelength = (
+                model_spectrum[0]
+            )
+
+            model_flux_raw = (
+                model_spectrum[1]
+            )
+
+            if not has_full_coverage(
+
+                model_wavelength,
+
+                jwst_wavelength
+
+            ):
+
+                number_skipped += 1
+                continue
+
+            model_flux = (
+                elfowl_to_jwst_units(
+                    model_flux_raw
+                )
+            )
+
+            modspec = np.array([
+
+                model_wavelength,
+                model_flux
+
+            ])
+
+            model_chi2, R2D2, convolved_model = (
+                calculate_chi2(
+
+                    obspec,
+                    modspec
+
+                )
+            )
+
+            if (
+
+                not np.isfinite(
+                    model_chi2
+                )
+                or
+                not np.isfinite(
+                    R2D2
+                )
+
+            ):
+                number_bad += 1
+                continue
+
+            radius = (
+
+                np.sqrt(
+                    R2D2
+                )
+                *
+                distance_m
+                /
+                RJUP
+
+            )
+
+            results.append({
+
+                "model":
+                    filename,
+
+                "filepath":
+                    filepath,
+
+                "Teff":
+                    params["Teff"],
+
+                "logg":
+                    params["logg"],
+
+                "gravity":
+                    params["gravity"],
+
+                "MH":
+                    params["MH"],
+
+                "CO":
+                    params["CO"],
+
+                "logKzz":
+                    params["logKzz"],
+
+                "chi2":
+                    model_chi2,
+
+                "R2D2":
+                    R2D2,
+
+                "radius":
+                    radius
+
+            })
+
+            number_fitted += 1
+
+        except Exception as error:
+
+            number_bad += 1
+            if number_bad <= 10:
+
+                print()
+                print(
+                    f"Error while fitting {filename}:"
+                )
+
+                print(error)
+
+        if (
+            index == 1
+            or
+            index % 50 == 0
+            or
+            index == len(
+                selected_models
+            )
+
+        ):
+
+
+            print(
+
+                f"[{index}/"
+                f"{len(selected_models)}] "
+                f"fitted={number_fitted} "
+                f"skipped={number_skipped} "
+                f"bad={number_bad} "
+            )
+
+    results_df = pd.DataFrame(
+        results
+    )
+
+    if len(results_df) == 0:
+
+        return (
+            results_df,
+            None,
+            None,
+            np.nan,
+            number_skipped,
+            number_fitted,
+            number_bad
+        )
+
+    results_df = (
+
+        results_df
+
+        .sort_values(
+            "chi2"
+        )
+
+        .reset_index(
+            drop=True
+        )
+
+    )
+
+    best_model = results_df.iloc[
+        0
+    ]
+
+    best_raw = (
+        load_elfowl_spectrum(
+            best_model["filepath"]
+        )
+    )
+
+    best_model_flux = (
+        elfowl_to_jwst_units(
+            best_raw[1]
+        )
+    )
+
+    best_modspec = np.array([
+        best_raw[0],
+        best_model_flux
+    ])
+
+    best_chi2_value, best_R2D2, best_convolved = (
+        calculate_chi2(
+            obspec,
+            best_modspec
+        )
+    )
+
+    best_flux = (
+        best_R2D2 * best_convolved
+    )
+
+    radius_error = monte_carlo_radius(
+
+        obspec,
+
+        best_convolved,
+
+        best_model["radius"],
+
+        best_model["R2D2"],
+
+        distance_pc,
+
+        distance_error_pc
+
+    )
+
+    return (
+
+        results_df,
+        best_model,
+        best_flux,
+        radius_error,
+        number_skipped,
+        number_fitted,
+        number_bad
+    )
+
+# Find all ElfOwl models
+
+print("Sonora ElfOwl atmospheric model fitting")
+
+all_elfowl_models = (
+    find_elfowl_models()
+)
+
+# Print model grid information
+
+grid_rows = []
+
+for filepath in all_elfowl_models:
+
+    params = parse_elfowl_filename(
+        filepath
+    )
+
+    if params is not None:
+
+        grid_rows.append({
+
+            "Teff":
+                params["Teff"],
+
+            "logg":
+                params["logg"],
+
+            "MH":
+                params["MH"],
+
+            "CO":
+                params["CO"],
+
+            "logKzz":
+                params["logKzz"]
+
+        })
+
+
+grid_df = pd.DataFrame(
+    grid_rows
+)
+
+print("ElfOwl grid")
+
+for parameter in [
+    "Teff",
+    "logg",
+    "MH",
+    "CO",
+    "logKzz"
+]:
+
+    values = np.sort(
+        grid_df[parameter].unique()
+    )
+
+    print()
+    print(
+        f"{parameter}:"
+    )
+
+    print(
+        values
+    )
+
+
+# Store for final results
+
+summary = []
+
+# Fit each target
+
+
+for target_index, row in targets.iterrows():
+
+    target_name = row[
+        "Target"
+    ]
+
+    distance_pc = float(
+        row[
+            "Distance"
+        ]
+    )
+
+    distance_error_pc = float(
+        row[
+            "Distance Error"
+        ]
+    )
+
+    reference_teff = float(
+        row[
+            "Reference Teff"
+        ]
+    )
+
+
+    print(
+
+        f"Target "
+        f"{target_index + 1}/"
+        f"{len(targets)}: "
+        f"{target_name}"
+
+    )
+
+    print(
+
+        f"Distance = "
+        f"{distance_pc:.3f} pc"
+
+    )
+
+    print(
+
+        f"Reference Teff = "
+        f"{reference_teff:.0f} K"
+
+    )
+
+    if USE_TEMPERATURE_WINDOW:
+
+        print(
+
+            f"Temperature window = "
+            f"+/- {TEMPERATURE_WINDOW} K"
+
+        )
+
+    else:
+
+        print(
+            "Temperature selection = full NEW ElfOwl grid"
+        )
+
+    try:
+
+        obspec = (
+            load_jwst_spectrum(
+                target_name
+            )
+        )
+
+
+    print(
+
+        f"JWST points = "
+        f"{len(obspec[0])}"
+
+    )
+
+    print(
+
+        f"JWST wavelength range = "
+        f"{np.min(obspec[0]):.3f} - "
+        f"{np.max(obspec[0]):.3f} μm"
+
+    )
+
+    (
+
+        results_df,
+
+        best_model,
+
+        best_flux,
+
+        radius_error,
+
+        number_skipped,
+
+        number_fitted,
+
+        number_bad
+
+    ) = fit_elfowl_grid(
+
+        obspec,
+
+        distance_pc,
+
+        distance_error_pc,
+
+        reference_teff,
+
+        all_elfowl_models
+
+    )
+
+
+    best_fit_plot = plot_best_fit(
+
+        obspec,
+        best_model,
+        best_flux,
+        target_name
+
+    )
+
+    summary_row = {
+
+        "Target":
+            target_name,
+
+        "Teff (K)":
+            best_model["Teff"],
+
+        "logg":
+            best_model["logg"],
+
+        "[M/H]":
+            best_model["MH"],
+
+        "C/O":
+            best_model["CO"],
+
+        "logKzz":
+            best_model["logKzz"],
+
+        "Reduced Chi2":
+            best_model["chi2"],
+
+        "Radius (RJup)":
+            best_model["radius"],
+
+        "Radius Error (RJup)":
+            radius_error
+
+    }
+
+    summary.append(
+        summary_row
+    )
+
+    print(
+        f"Best ElfOwl fit — {target_name}"
+    )
+
+    print()
+
+    print(
+        f"Model = "
+        f"{best_model['model']}"
+    )
+
+    print(
+        f"Teff = "
+        f"{best_model['Teff']:.0f} K"
+    )
+
+    print(
+        f"logg = "
+        f"{best_model['logg']:.3f}"
+    )
+
+    print(
+        f"[M/H] = "
+        f"{best_model['MH']:.2f}"
+    )
+
+    print(
+        f"C/O = "
+        f"{best_model['CO']:.2f}"
+    )
+
+    print(
+        f"logKzz = "
+        f"{best_model['logKzz']:.2f}"
+    )
+
+    print(
+        f"Reduced chi-squared = "
+        f"{best_model['chi2']:.4f}"
+    )
+
+    print(
+
+        f"Radius = "
+        f"{best_model['radius']:.4f} "
+        f"+/- "
+        f"{radius_error:.4f} RJup"
+
+    )
+
+    print()
+
+    print(
+        f"Best-fit plot = "
+        f"{best_fit_plot}"
+    )
+
+    print()
+    print(
+        f"{target_name} complete."
+    )
+
+
+# Save final CSV
+
+summary_df = pd.DataFrame(
+    summary
+)
+
+final_csv = os.path.join(
+
+    output_folder,
+
+    "ElfOwl_Final_Best_Fits.csv"
+
+)
+
+summary_df.to_csv(
+
+    final_csv,
+    index=False
+
+)
+
+
+# Print final results
+
+print("Final Sonora ElfOwl best-fit results")
+
+if len(summary_df) > 0:
+
+    print(
+        summary_df.to_string(
+            index=False
+        )
+    )
+
+print( "Sonora ElfOwl fitting complete.")
