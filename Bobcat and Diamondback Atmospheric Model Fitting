@@ -556,21 +556,6 @@ def fit_model_grid(
     )
 
 
-def calculate_teff_uncertainty(results_sorted, percent=0.05):
-
-    best_chi2 = results_sorted["chi2"].min()
-
-    limit = best_chi2 * (1 + percent)
-
-    good_models = results_sorted[
-        results_sorted["chi2"] <= limit
-    ]
-
-    teff_error = np.std(good_models["Teff"])
-
-    return teff_error
-
-
 # Plot Best Fitting Model
 
 def plot_best_fit(
@@ -791,11 +776,6 @@ for _, row in targets.iterrows():
         distance_error_pc
     )
 
-    # Calculate Bobcat Teff uncertainty
-
-    bobcat_teff_error = calculate_teff_uncertainty(
-        bobcat_results
-    )
 
     plot_best_fit(
 
@@ -819,11 +799,6 @@ for _, row in targets.iterrows():
         distance_error_pc
     )
 
-    # Calculate Diamondback Teff uncertainty
-
-    diamondback_teff_error = calculate_teff_uncertainty(
-        diamond_results
-    )
 
     plot_best_fit(
 
@@ -852,8 +827,6 @@ for _, row in targets.iterrows():
 
         "Bobcat Teff": bobcat_best["Teff"],
 
-        "Bobcat Teff Error": bobcat_teff_error,
-
         "Bobcat logg": bobcat_best["log g"],
 
         "Bobcat [M/H]": bobcat_best["MH"],
@@ -870,7 +843,6 @@ for _, row in targets.iterrows():
 
         "Diamondback Teff": diamond_best["Teff"],
 
-        "Diamondback Teff Error": diamondback_teff_error,
 
         "Diamondback logg": diamond_best["log g"],
 
